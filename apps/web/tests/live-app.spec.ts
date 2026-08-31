@@ -7,10 +7,14 @@ const SHOP_PHONE = "+221770000001";
 const CLIENT_PHONE = "+221770000002";
 const DEMO_SHOP_PHONE = "+221703549365";
 const DEMO_CLIENT_PHONE = "+221777629953";
+const QR_NEW_CLIENT_PHONE = "+221770000003";
 const OTP = "123456";
 
 let shopClientId = "";
 let shopAccessToken = "";
+let shopQrCode = "";
+let demoQrCode = "";
+let shopName = "";
 
 async function jsonRequest<T>(url: string, init: RequestInit = {}) {
   const response = await fetch(url, init);
@@ -103,6 +107,13 @@ test.beforeAll(async () => {
   }
 
   const qr = await api<{ code: string }>(shopLogin.access_token, "/api/shop/qr", { method: "POST" });
+  shopQrCode = qr.code;
+  const resolvedShop = await jsonRequest<{ shopName: string }>(`${API_URL}/api/qr/shops/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: qr.code }),
+  });
+  shopName = resolvedShop.shopName;
   await api(clientLogin.access_token, "/api/shop/connect", {
     method: "POST", body: JSON.stringify({ code: qr.code }),
   });
@@ -146,6 +157,7 @@ test.beforeAll(async () => {
     });
   }
   const demoQr = await api<{ code: string }>(demoShopLogin.access_token, "/api/shop/qr", { method: "POST" });
+  demoQrCode = demoQr.code;
   await api(demoClientLogin.access_token, "/api/shop/connect", {
     method: "POST", body: JSON.stringify({ code: demoQr.code }),
   });
@@ -183,6 +195,68 @@ test("the shop UI reads live summary and relationship data", async ({ page }) =>
   await expect(page.getByText("Seul un client vérifié peut scanner une boutique.")).toBeVisible();
 });
 
+test("a visitor without the app returns from OTP to the scanned shop and records through QR", async ({ page, browser }) => {
+  test.setTimeout(120_000);
+  const title = `Achat QR E2E ${Date.now()}`;
+
+  await page.goto(`/q/s/${shopQrCode}`);
+  await expect(page.getByRole("heading", { name: shopName })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Aucune application n'est nécessaire.")).toBeVisible();
+  await page.getByRole("link", { name: "Continuer avec mon numéro" }).click();
+
+  await expect(page.getByRole("heading", { name: "Continuer avec votre téléphone" })).toBeVisible();
+  await expect(page.getByLabel("Votre nom complet")).toHaveCount(0);
+  await page.getByLabel("Numéro de téléphone").fill(QR_NEW_CLIENT_PHONE);
+  await page.getByRole("button", { name: "Recevoir plutôt le code par SMS" }).click();
+  await page.getByLabel("Code à 6 chiffres").fill(OTP);
+  await page.getByRole("button", { name: "Vérifier et continuer" }).click();
+
+  const firstProfile = page.getByRole("heading", { name: "Comment vous appelez-vous ?" });
+  const confirmShop = page.getByText("Confirmer la boutique");
+  await expect(firstProfile.or(confirmShop)).toBeVisible({ timeout: 15_000 });
+  if (await firstProfile.isVisible()) {
+    await page.getByLabel("Votre nom").fill("Client QR E2E");
+    await page.getByRole("button", { name: "Continuer" }).click();
+  }
+
+  await expect(page.getByRole("heading", { name: shopName })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Confirmer la boutique")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Confirmer et continuer" }).click();
+  await expect(page.getByRole("heading", { name: "Nouvelle opération" })).toBeVisible();
+  await page.getByLabel("Nom de l'article ou service").fill(title);
+  await page.getByLabel("Prix total").fill("1750");
+  await page.getByRole("button", { name: "Voir le récapitulatif" }).click();
+
+  await expect(page.getByRole("heading", { name: "Confirmer l'opération" })).toBeVisible();
+  await expect(page.getByText("Solde actuel")).toBeVisible();
+  await expect(page.getByText("Après l'opération")).toBeVisible();
+  await expect(page.getByText("Enregistré par vous via le QR de la boutique")).toBeVisible();
+  await page.getByRole("button", { name: "Confirmer l'achat" }).click();
+  await expect(page.getByRole("heading", { name: "Votre situation" })).toBeVisible();
+  await expect(page.getByText(title, { exact: true })).toBeVisible();
+
+  await new Promise((resolve) => setTimeout(resolve, 5_100));
+  const shopContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const shopPage = await shopContext.newPage();
+  await loginThroughUi(shopPage, SHOP_PHONE);
+  await shopPage.getByRole("button", { name: "Activité" }).click();
+  await expect(shopPage.getByText(title, { exact: true })).toBeVisible();
+  await expect(shopPage.getByText(/Client via QR/).first()).toBeVisible();
+  await shopContext.close();
+});
+
+test("an existing client session opens the same QR without another OTP", async ({ page }) => {
+  test.setTimeout(60_000);
+  await new Promise((resolve) => setTimeout(resolve, 5_100));
+  await demoLoginThroughUi(page, DEMO_CLIENT_PHONE);
+  await expect(page.getByRole("button", { name: /Scanner une boutique/ })).toBeVisible();
+  await page.goto(`/q/s/${demoQrCode}`);
+  await expect(page.getByText("Confirmer la boutique")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("link", { name: "Continuer avec mon numéro" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Confirmer et continuer" }).click();
+  await expect(page.getByRole("heading", { name: "Nouvelle opération" })).toBeVisible();
+});
+
 test("the client records a new debt into the same live journal", async ({ page }) => {
   test.setTimeout(60_000);
   await new Promise((resolve) => setTimeout(resolve, 5_100));
@@ -200,7 +274,9 @@ test("the client records a new debt into the same live journal", async ({ page }
   const title = `Achat E2E ${Date.now()}`;
   await page.getByLabel("Nom de l'article ou service").fill(title);
   await page.getByLabel("Prix total").fill("1750");
-  await page.getByRole("button", { name: "Enregistrer l'achat" }).click();
+  await page.getByRole("button", { name: "Voir le récapitulatif" }).click();
+  await expect(page.getByText("Enregistré par vous dans Boutikier")).toBeVisible();
+  await page.getByRole("button", { name: "Confirmer l'achat" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Achat ajouté au journal" })).toBeVisible();
   await expect(page.getByLabel("Nom de l'article ou service")).toHaveValue("");
   await page.getByRole("button", { name: "Retour" }).click();

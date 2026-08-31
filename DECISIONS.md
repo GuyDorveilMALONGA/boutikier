@@ -29,5 +29,6 @@
 | D025 | The shop app has three roots: `Carnet`, `Activité`, and `Compte` | Mobile uses a bottom bar; desktop uses header navigation. Child screens have one contextual back action, and focused forms hide root navigation. |
 | D026 | Permanent shop QR values are HMAC-signed and only their SHA-256 hash is stored | A QR can be reproduced from its opaque ID without persisting a reusable raw credential or exposing an internal UUID alone. |
 | D027 | The production web app is installable as a PWA, but financial API responses are never cached | Static shell assets may work offline while balances and journals always come from an authenticated, current server response. |
+| D028 | A visitor entering through a shop QR creates or restores a lightweight Supabase Auth client through phone OTP, then records only after an explicit financial preview | Anonymous journal writes remain forbidden; the verified client is accountable and shop approval does not block a confirmed real-world exchange. |
 
 When a decision changes, replace its active row in the same change. Do not append obsolete decisions here.

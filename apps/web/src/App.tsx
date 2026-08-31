@@ -14,7 +14,7 @@ import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient
 import { BrowserRouter, Link, useLocation, useNavigate } from "react-router-dom";
 import { api, ApiError } from "./lib/api";
 import { removeOperationDraft, saveOperationDraft } from "./lib/drafts";
-import { supabase, supabaseConfig } from "./lib/supabase";
+import { supabase, supabaseConfig, type AuthSession } from "./lib/supabase";
 import { useAuth } from "./lib/use-auth";
 
 const money = new Intl.NumberFormat("fr-FR");
@@ -57,6 +57,10 @@ function phoneE164(value: string) {
   return undefined;
 }
 
+function safeReturnTo(value: string | null, fallback = "/") {
+  return value?.startsWith("/") && !value.startsWith("//") ? value : fallback;
+}
+
 function errorText(error: unknown) {
   if (error instanceof ApiError && error.code === "authentication_required") return "Votre session a expiré. Reconnectez-vous.";
   if (error instanceof ApiError && error.status === 409) return "Cette opération ressemble à une saisie déjà enregistrée.";
@@ -81,8 +85,12 @@ type PendingSignup = { audience: SignupAudience; name: string };
 const pendingSignupKey = "boutikier:pending-signup";
 const localDemoPhones = new Set(["+221777629953", "+221703549365"]);
 
+function demoPinEnabled() {
+  return import.meta.env.DEV || import.meta.env.VITE_DEMO_PIN_ENABLED === "true";
+}
+
 function usesLocalDemoPin(phone: string) {
-  return import.meta.env.DEV && localDemoPhones.has(phone);
+  return demoPinEnabled() && localDemoPhones.has(phone);
 }
 
 function readPendingSignup(): PendingSignup | null {
@@ -128,13 +136,15 @@ function AuthPage() {
   const [channel, setChannel] = useState<"whatsapp" | "sms">("whatsapp");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const returnTo = new URLSearchParams(location.search).get("returnTo") || "/";
+  const returnTo = safeReturnTo(new URLSearchParams(location.search).get("returnTo"));
+  const isQrReturn = returnTo.startsWith("/q/s/");
+  const productionDemo = import.meta.env.VITE_DEMO_PIN_ENABLED === "true";
   const googleEnabled = import.meta.env.VITE_GOOGLE_AUTH_ENABLED === "true";
 
   async function sendOtp(event?: FormEvent, requestedChannel = channel) {
     event?.preventDefault();
     setError(null);
-    if (mode === "signup" && name.trim().length < 2) {
+    if (!isQrReturn && mode === "signup" && name.trim().length < 2) {
       setError(audience === "shop" ? "Entrez le nom de votre boutique." : "Entrez votre nom complet.");
       return;
     }
@@ -143,16 +153,24 @@ function AuthPage() {
       setError("Entrez un numéro valide, par exemple 77 000 00 00.");
       return;
     }
-    setPending(true);
-    const result = await supabase.auth.signInWithOtp({ phone: normalized, options: { channel: requestedChannel } });
-    setPending(false);
-    if (result.error) {
-      setError(requestedChannel === "whatsapp" ? "WhatsApp n'est pas disponible pour ce numéro. Essayez par SMS." : result.error.message);
+    if (import.meta.env.VITE_DEMO_PIN_ENABLED === "true" && !localDemoPhones.has(normalized)) {
+      setError("Ce test est réservé aux deux numéros de démonstration autorisés.");
       return;
     }
-    setChannel(requestedChannel);
+    setPending(true);
+    const effectiveChannel = productionDemo ? "sms" : requestedChannel;
+    const result = await supabase.auth.signInWithOtp({
+      phone: normalized,
+      options: { channel: effectiveChannel, shouldCreateUser: true },
+    });
+    setPending(false);
+    if (result.error) {
+      setError(effectiveChannel === "whatsapp" ? "WhatsApp n'est pas disponible pour ce numéro. Essayez par SMS." : result.error.message);
+      return;
+    }
+    setChannel(effectiveChannel);
     setPhone(normalized);
-    savePendingSignup(mode === "signup" ? { audience, name: name.trim() } : null);
+    savePendingSignup(!isQrReturn && mode === "signup" ? { audience, name: name.trim() } : null);
     setSent(true);
   }
 
@@ -172,12 +190,13 @@ function AuthPage() {
     try {
       const current = await api.me();
       let next = current;
-      const signup = mode === "signup" ? readPendingSignup() : null;
+      const signup = !isQrReturn && mode === "signup" ? readPendingSignup() : null;
       if (signup && current.needsOnboarding) {
         next = signup.audience === "shop" ? await api.onboardShop(signup.name) : await api.onboardClient(signup.name);
       }
       savePendingSignup(null);
       if (result.data.user) queryClient.setQueryData(["me", result.data.user.id], next);
+      if (isQrReturn && next.needsOnboarding) return;
       const destination = returnTo !== "/" ? returnTo : next.client && !next.shop ? "/client" : "/";
       navigate(destination, { replace: true });
     } catch (reason) {
@@ -209,13 +228,13 @@ function AuthPage() {
 
   const otpLength = usesLocalDemoPin(phone) ? 4 : 6;
 
-  return <AuthFrame footnote="Aucun mot de passe à retenir.">
-      <p className="panel-heading-kicker">{sent ? "Vérification" : mode === "signup" ? "Nouveau sur Boutikier" : "Bon retour"}</p>
-      <h1>{sent ? "Vérifiez votre numéro" : mode === "signup" ? "Créer votre compte" : "Ouvrir votre espace"}</h1>
-      <p>{sent ? `Saisissez le code envoyé au ${phone}.` : mode === "signup" ? "Choisissez votre espace, indiquez votre nom, puis vérifiez votre téléphone." : "Retrouvez votre espace avec votre numéro vérifié."}</p>
+  return <AuthFrame footnote={isQrReturn ? "Aucune application à installer." : "Aucun mot de passe à retenir."}>
+      <p className="panel-heading-kicker">{sent ? "Vérification" : isQrReturn ? "QR boutique" : mode === "signup" ? "Nouveau sur Boutikier" : "Bon retour"}</p>
+      <h1>{sent ? "Vérifiez votre numéro" : isQrReturn ? "Continuer avec votre téléphone" : mode === "signup" ? "Créer votre compte" : "Ouvrir votre espace"}</h1>
+      <p>{sent ? productionDemo ? `Saisissez le PIN de test pour ${phone}. Aucun message n'est envoyé.` : `Saisissez le code envoyé au ${phone}.` : isQrReturn ? "Votre numéro vérifié crée ou retrouve votre compte client léger, puis vous ramène à la boutique scannée." : mode === "signup" ? "Choisissez votre espace, indiquez votre nom, puis vérifiez votre téléphone." : "Retrouvez votre espace avec votre numéro vérifié."}</p>
       {error && <div className="inline-error" role="alert"><CircleAlert size={17} />{error}</div>}
       {!sent ? <form onSubmit={sendOtp}>
-        {mode === "signup" && <>
+        {!isQrReturn && mode === "signup" && <>
           <fieldset className="signup-audience"><legend>Je crée un espace</legend>
             <button className={audience === "client" ? "active" : ""} type="button" onClick={() => setAudience("client")}><UserPlus size={18} /><span>Client</span></button>
             <button className={audience === "shop" ? "active" : ""} type="button" onClick={() => setAudience("shop")}><Store size={18} /><span>Boutiquier</span></button>
@@ -223,13 +242,13 @@ function AuthPage() {
           <Field label={audience === "shop" ? "Nom de la boutique" : "Votre nom complet"} value={name} onChange={setName} placeholder={audience === "shop" ? "Ex. Boutique Diallo" : "Ex. Mamadou Diop"} autoFocus />
         </>}
         <Field label="Numéro de téléphone" value={phone} onChange={setPhone} placeholder="77 000 00 00" inputMode="tel" autoFocus={mode === "login"} />
-        <button className="primary-action submit auth-primary" type="submit" disabled={pending}><MessageCircle size={18} /> {pending ? "Envoi…" : mode === "signup" ? "Créer avec WhatsApp" : "Continuer avec WhatsApp"} <ChevronRight size={18} /></button>
-        <button className="text-action auth-fallback" type="button" onClick={() => { void sendOtp(undefined, "sms"); }}>Recevoir plutôt le code par SMS</button>
-        {googleEnabled && <><div className="auth-divider"><span>ou</span></div><button className="google-auth" type="button" onClick={() => { void continueWithGoogle(); }}><span className="google-mark">G</span> Continuer avec Google</button></>}
+        <button className="primary-action submit auth-primary" type="submit" disabled={pending}><MessageCircle size={18} /> {pending ? "Préparation…" : productionDemo ? mode === "signup" && !isQrReturn ? "Créer mon espace de test" : "Continuer avec mon PIN" : isQrReturn ? "Continuer avec WhatsApp" : mode === "signup" ? "Créer avec WhatsApp" : "Continuer avec WhatsApp"} <ChevronRight size={18} /></button>
+        {!productionDemo && <button className="text-action auth-fallback" type="button" onClick={() => { void sendOtp(undefined, "sms"); }}>Recevoir plutôt le code par SMS</button>}
+        {googleEnabled && !isQrReturn && <><div className="auth-divider"><span>ou</span></div><button className="google-auth" type="button" onClick={() => { void continueWithGoogle(); }}><span className="google-mark">G</span> Continuer avec Google</button></>}
         <small className="auth-legal">En continuant, vous acceptez les conditions d'utilisation et la politique de confidentialité.</small>
-        <div className="auth-mode-switch"><span>{mode === "signup" ? "Vous avez déjà un compte ?" : "Pas encore de compte ?"}</span><button type="button" onClick={() => changeMode(mode === "signup" ? "login" : "signup")}>{mode === "signup" ? "Se connecter" : "Créer un compte"}</button></div>
+        {!isQrReturn && <div className="auth-mode-switch"><span>{mode === "signup" ? "Vous avez déjà un compte ?" : "Pas encore de compte ?"}</span><button type="button" onClick={() => changeMode(mode === "signup" ? "login" : "signup")}>{mode === "signup" ? "Se connecter" : "Créer un compte"}</button></div>}
       </form> : <form onSubmit={verify}>
-        {mode === "signup" && <div className="signup-summary"><span>{audience === "shop" ? <Store size={18} /> : <UserPlus size={18} />}</span><div><strong>{name}</strong><small>Espace {audience === "shop" ? "boutique" : "client"}</small></div></div>}
+        {!isQrReturn && mode === "signup" && <div className="signup-summary"><span>{audience === "shop" ? <Store size={18} /> : <UserPlus size={18} />}</span><div><strong>{name}</strong><small>Espace {audience === "shop" ? "boutique" : "client"}</small></div></div>}
         <label className="field otp-field"><span>Code à {otpLength} chiffres</span><input className="otp-input" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, otpLength))} placeholder={"*".repeat(otpLength)} inputMode="numeric" autoComplete="one-time-code" autoFocus /></label>
         <button className="primary-action submit auth-primary" type="submit" disabled={pending || code.trim().length !== otpLength}>{pending ? "Vérification…" : "Vérifier et continuer"} <ChevronRight size={18} /></button>
         <button className="text-action auth-fallback" type="button" onClick={() => { void sendOtp(undefined, channel); }}>Renvoyer le code</button>
@@ -273,22 +292,25 @@ function PhoneClaimPage() {
 function OnboardingPage({ context }: { context: ActorContext }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
+  const returnTo = safeReturnTo(new URLSearchParams(location.search).get("returnTo"), "/client");
+  const isQrOnboarding = returnTo.startsWith("/q/s/");
   const pendingSignup = readPendingSignup();
-  const [audience, setAudience] = useState<SignupAudience | null>(pendingSignup?.audience ?? null);
+  const [audience, setAudience] = useState<SignupAudience | null>(isQrOnboarding ? "client" : pendingSignup?.audience ?? null);
   const [name, setName] = useState(pendingSignup?.name ?? "");
   const mutation = useMutation({
     mutationFn: () => audience === "shop" ? api.onboardShop(name) : api.onboardClient(name),
     onSuccess: async (next) => {
       savePendingSignup(null);
       await queryClient.invalidateQueries({ queryKey: ["me"] });
-      navigate(next.shop ? "/" : "/client", { replace: true });
+      navigate(isQrOnboarding && next.client ? returnTo : next.shop ? "/" : "/client", { replace: true });
     },
   });
   void context;
-  return <AuthFrame footnote="Les espaces boutique et client restent séparés.">
+  return <AuthFrame footnote={isQrOnboarding ? "Votre téléphone est déjà vérifié." : "Les espaces boutique et client restent séparés."}>
       <p className="panel-heading-kicker">Première connexion</p>
-      <h1>Quel espace voulez-vous créer ?</h1>
-      <p>Votre numéro est vérifié. Chaque espace reste séparé et adapté à son usage.</p>
+      <h1>{isQrOnboarding ? "Comment vous appelez-vous ?" : "Quel espace voulez-vous créer ?"}</h1>
+      <p>{isQrOnboarding ? "Ce nom sera présenté au boutiquier avec les opérations que vous enregistrez." : "Votre numéro est vérifié. Chaque espace reste séparé et adapté à son usage."}</p>
       {!audience ? <div className="audience-choices">
         <button onClick={() => setAudience("shop")}><Store size={22} /><span><strong>Créer mon espace boutique</strong><small>Tenir le carnet de mes clients</small></span><ChevronRight size={18} /></button>
         <button onClick={() => setAudience("client")}><BookOpen size={22} /><span><strong>Créer mon espace client</strong><small>Retrouver mes boutiques et mes relevés</small></span><ChevronRight size={18} /></button>
@@ -296,7 +318,7 @@ function OnboardingPage({ context }: { context: ActorContext }) {
         <Field label={audience === "shop" ? "Nom de la boutique" : "Votre nom"} value={name} onChange={setName} placeholder={audience === "shop" ? "Ex. Boutique Diallo" : "Ex. Mamadou Diop"} autoFocus />
         {mutation.error && <div className="inline-error" role="alert"><CircleAlert size={17} />{errorText(mutation.error)}</div>}
         <button className="primary-action submit" type="submit" disabled={!name.trim() || mutation.isPending}>{mutation.isPending ? "Enregistrement…" : "Continuer"}<ChevronRight size={18} /></button>
-        <button className="text-action auth-fallback" type="button" onClick={() => setAudience(null)}>Retour</button>
+        {!isQrOnboarding && <button className="text-action auth-fallback" type="button" onClick={() => setAudience(null)}>Retour</button>}
       </form>}
   </AuthFrame>;
 }
@@ -307,6 +329,7 @@ function AppRoutes() {
   const previousUserId = useRef<string | null | undefined>(undefined);
   const location = useLocation();
   const isClientPath = location.pathname === "/client" || location.pathname.startsWith("/client/");
+  const authReturnTo = location.pathname === "/connexion" ? safeReturnTo(new URLSearchParams(location.search).get("returnTo")) : "/";
   const userId = session?.user.id ?? null;
   useEffect(() => {
     if (previousUserId.current !== undefined && previousUserId.current !== userId) {
@@ -318,13 +341,14 @@ function AppRoutes() {
 
   if (location.pathname.startsWith("/s/")) return <PublicStatement />;
   if (!supabaseConfig.configured) return <ConfigRequired />;
-  if (location.pathname.startsWith("/q/s/")) return <QrLanding />;
+  if (location.pathname.startsWith("/q/s/")) return loading ? <Loading label="Ouverture du QR…" /> : <QrLanding session={session} />;
   if (loading) return <Loading label="Ouverture de votre espace…" />;
   if (!session) return <AuthPage />;
   if (contextQuery.isLoading) return <Loading />;
   if (contextQuery.error) return <ErrorState error={contextQuery.error} />;
   if (!contextQuery.data?.phoneE164) return <PhoneClaimPage />;
   if (contextQuery.data?.needsOnboarding) return <OnboardingPage context={contextQuery.data} />;
+  if (authReturnTo !== "/") return <NavigateTo to={authReturnTo} />;
   if (isClientPath) {
     if (!contextQuery.data?.client) return <AccessDenied label="Cet espace est réservé à un client vérifié." />;
     return <ClientApp context={contextQuery.data} />;
@@ -428,7 +452,7 @@ function ShopRelationship({ relation, screen, targetEntryId, onNavigate, onDone 
 function ShopActivity() {
   const query = useQuery({ queryKey: ["shop-activity"], queryFn: api.shopActivity });
   const navigate = useNavigate();
-  return <main className="shop-root-page shop-activity-page"><div className="shop-page-heading"><p>Suivi quotidien</p><h1>Activité</h1><span>Les dernières écritures confirmées de tous vos clients.</span></div>{query.isLoading ? <Loading /> : query.error ? <ErrorState error={query.error} /> : <section className="shop-activity-list" aria-label="Opérations récentes"><div className="section-heading"><div><p>Journal global</p><h3>Opérations récentes</h3></div><span>{query.data?.items.length ?? 0}</span></div>{query.data?.items.map(({ entry, client }) => <button className="shop-activity-row" key={`${client.id}-${entry.id}`} onClick={() => navigate(`/clients/${client.id}`)}><span className={`entry-icon ${signedAmount(entry) > 0 ? "debt" : "credit"}`}><PackagePlus size={17} /></span><span><strong>{entry.title}</strong><small>{client.name} · {dateLabel(entry.recordedAt)}, {timeLabel(entry.recordedAt)}</small></span><b className={signedAmount(entry) > 0 ? "debt" : "credit"}>{signedAmount(entry) > 0 ? "+" : "−"}{money.format(Math.abs(signedAmount(entry)))}</b><ChevronRight size={17} /></button>)}</section>}</main>;
+  return <main className="shop-root-page shop-activity-page"><div className="shop-page-heading"><p>Suivi quotidien</p><h1>Activité</h1><span>Les dernières écritures confirmées de tous vos clients.</span></div>{query.isLoading ? <Loading /> : query.error ? <ErrorState error={query.error} /> : <section className="shop-activity-list" aria-label="Opérations récentes"><div className="section-heading"><div><p>Journal global</p><h3>Opérations récentes</h3></div><span>{query.data?.items.length ?? 0}</span></div>{query.data?.items.map(({ entry, client }) => <button className="shop-activity-row" key={`${client.id}-${entry.id}`} onClick={() => navigate(`/clients/${client.id}`)}><span className={`entry-icon ${signedAmount(entry) > 0 ? "debt" : "credit"}`}><PackagePlus size={17} /></span><span><strong>{entry.title}</strong><small>{client.name} · {entry.recordedByRole === "client" ? entry.sourceChannel === "shop_qr" ? "Client via QR" : "Enregistré par le client" : "Enregistré par vous"} · {dateLabel(entry.recordedAt)}, {timeLabel(entry.recordedAt)}</small></span><b className={signedAmount(entry) > 0 ? "debt" : "credit"}>{signedAmount(entry) > 0 ? "+" : "−"}{money.format(Math.abs(signedAmount(entry)))}</b><ChevronRight size={17} /></button>)}</section>}</main>;
 }
 
 function ShopAccount({ context, notify }: { context: ActorContext; notify: (message: string) => void }) {
@@ -456,14 +480,16 @@ function ClientApp({ context }: { context: ActorContext }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const homeQuery = useQuery({ queryKey: ["client-home"], queryFn: api.clientHome });
-  const [tab, setTab] = useState<"home" | "ledger" | "credit" | "profile">(new URLSearchParams(location.search).get("tab") === "credit" ? "credit" : "home");
-  const [relationshipId, setRelationshipId] = useState<string | null>(new URLSearchParams(location.search).get("shopClientId"));
+  const initialClientParams = new URLSearchParams(location.search);
+  const [tab, setTab] = useState<"home" | "ledger" | "credit" | "profile">(initialClientParams.get("tab") === "credit" ? "credit" : "home");
+  const [relationshipId, setRelationshipId] = useState<string | null>(initialClientParams.get("shopClientId"));
+  const [operationSource, setOperationSource] = useState<"app" | "shop_qr">(initialClientParams.get("source") === "shop_qr" ? "shop_qr" : "app");
   const [mode, setMode] = useState<"debt" | "repayment">("debt");
   const [amountsVisible, setAmountsVisible] = useState(() => localStorage.getItem("boutikier:amounts") !== "hidden");
   const [disputeEntry, setDisputeEntry] = useState<{ relation: Relationship; entry: LedgerEntry } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const relationQuery = useQuery({ queryKey: ["client-relationship", relationshipId], queryFn: () => api.clientRelationship(relationshipId!), enabled: Boolean(relationshipId) });
-  useEffect(() => { const requested = new URLSearchParams(location.search).get("shopClientId"); if (requested) { setRelationshipId(requested); setTab("credit"); } }, [location.search]);
+  useEffect(() => { const params = new URLSearchParams(location.search); const requested = params.get("shopClientId"); if (requested) { setRelationshipId(requested); setOperationSource(params.get("source") === "shop_qr" ? "shop_qr" : "app"); setTab("credit"); } }, [location.search]);
   useEffect(() => { localStorage.setItem("boutikier:amounts", amountsVisible ? "visible" : "hidden"); }, [amountsVisible]);
   function notify(message: string) { setToast(message); window.setTimeout(() => setToast(null), 2600); }
   function invalidate() { void Promise.all([queryClient.invalidateQueries({ queryKey: ["client-home"] }), queryClient.invalidateQueries({ queryKey: ["client-relationship", relationshipId] })]); }
@@ -477,7 +503,7 @@ function ClientApp({ context }: { context: ActorContext }) {
     <header className="client-account-header"><div className="brand-lockup"><span className="brand-mark"><BrandLogo /></span><div><strong>Boutikier</strong><span>Espace client</span></div></div><div className="account-person"><span className="avatar">{initials(context.client?.displayName || "")}</span><div><strong>{context.client?.displayName}</strong><span><BadgeCheck size={13} /> Numéro vérifié</span></div></div></header>
     <div className="client-account-layout">
       <nav className="client-nav" aria-label="Navigation client"><ClientNavButton active={tab === "home"} icon={<Home size={18} />} label="Accueil" onClick={() => setTab("home")} /><ClientNavButton active={tab === "ledger"} icon={<BookOpen size={18} />} label="Mes relevés" onClick={() => setTab("ledger")} /><ClientNavButton active={tab === "credit"} icon={<Plus size={18} />} label="Enregistrer" onClick={() => { setMode("debt"); setTab("credit"); }} /><ClientNavButton active={tab === "profile"} icon={<BadgeCheck size={18} />} label="Mon compte" onClick={() => setTab("profile")} /></nav>
-      <main className="client-account-content">{homeQuery.isLoading ? <Loading /> : homeQuery.error ? <ErrorState error={homeQuery.error} /> : disputeEntry ? <DisputeForm relation={disputeEntry.relation} entry={disputeEntry.entry} onCancel={() => setDisputeEntry(null)} onDone={(message) => { setDisputeEntry(null); invalidate(); notify(message); }} /> : tab === "home" ? <ClientHome firstName={firstName} relationships={home?.relationships ?? []} totalBalance={totalBalance} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onOpenLedger={openLedger} onDebt={(id) => { setRelationshipId(id); setMode("debt"); setTab("credit"); }} onRepayment={(id) => { setRelationshipId(id); setMode("repayment"); setTab("credit"); }} /> : tab === "ledger" ? <ClientLedger relationships={home?.relationships ?? []} active={activeRelation} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onSelect={setRelationshipId} onDispute={(entry) => activeRelation && setDisputeEntry({ relation: activeRelation, entry })} /> : tab === "credit" ? activeRelation ? <OperationForm relation={activeRelation} mode={mode} clientMode onCancel={() => setTab("home")} onDone={(message) => { invalidate(); notify(message); }} /> : <NoRelationship onScan={() => navigate("/client/scanner")} /> : <ClientProfile context={context} />}</main>
+      <main className="client-account-content">{homeQuery.isLoading ? <Loading /> : homeQuery.error ? <ErrorState error={homeQuery.error} /> : disputeEntry ? <DisputeForm relation={disputeEntry.relation} entry={disputeEntry.entry} onCancel={() => setDisputeEntry(null)} onDone={(message) => { setDisputeEntry(null); invalidate(); notify(message); }} /> : tab === "home" ? <ClientHome firstName={firstName} relationships={home?.relationships ?? []} totalBalance={totalBalance} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onScan={() => navigate("/client/scanner")} onOpenLedger={openLedger} onDebt={(id) => { setRelationshipId(id); setOperationSource("app"); setMode("debt"); setTab("credit"); }} onRepayment={(id) => { setRelationshipId(id); setOperationSource("app"); setMode("repayment"); setTab("credit"); }} /> : tab === "ledger" ? <ClientLedger relationships={home?.relationships ?? []} active={activeRelation} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onSelect={setRelationshipId} onDispute={(entry) => activeRelation && setDisputeEntry({ relation: activeRelation, entry })} /> : tab === "credit" ? activeRelation ? <OperationForm relation={activeRelation} mode={mode} clientMode sourceChannel={operationSource} onCancel={() => setTab("home")} onDone={(message) => { invalidate(); notify(message); if (operationSource === "shop_qr") { setOperationSource("app"); setTab("home"); navigate("/client", { replace: true }); } }} /> : <NoRelationship onScan={() => navigate("/client/scanner")} /> : <ClientProfile context={context} />}</main>
     </div>
     {toast && <div className="toast" role="status"><Check size={17} /> {toast}</div>}
   </div>;
@@ -485,9 +511,9 @@ function ClientApp({ context }: { context: ActorContext }) {
 
 function ClientNavButton({ active, icon, label, onClick }: { active: boolean; icon: ReactNode; label: string; onClick: () => void }) { return <button className={active ? "active" : ""} onClick={onClick}>{icon}<span>{label}</span></button>; }
 
-function ClientHome({ firstName, relationships, totalBalance, amountsVisible, onToggleAmounts, onOpenLedger, onDebt, onRepayment }: { firstName: string; relationships: Relationship[]; totalBalance: number; amountsVisible: boolean; onToggleAmounts: () => void; onOpenLedger: (id: string) => void; onDebt: (id: string) => void; onRepayment: (id: string) => void }) {
+function ClientHome({ firstName, relationships, totalBalance, amountsVisible, onToggleAmounts, onScan, onOpenLedger, onDebt, onRepayment }: { firstName: string; relationships: Relationship[]; totalBalance: number; amountsVisible: boolean; onToggleAmounts: () => void; onScan: () => void; onOpenLedger: (id: string) => void; onDebt: (id: string) => void; onRepayment: (id: string) => void }) {
   const recent = relationships.flatMap((relation) => relation.entries.map((entry) => ({ relation, entry }))).sort((left, right) => new Date(right.entry.recordedAt).getTime() - new Date(left.entry.recordedAt).getTime()).slice(0, 3);
-  return <div className="client-dashboard"><div className="client-page-title"><p>Bonjour {firstName}</p><h1>Votre situation</h1></div><section className="client-summary single"><div className="client-debt-total"><span>Dette totale</span><strong>{amountsVisible ? formatMoney(totalBalance) : "******"}</strong><small>{relationships.length} boutique{relationships.length > 1 ? "s" : ""}</small><button className="balance-visibility" onClick={onToggleAmounts} aria-label={amountsVisible ? "Masquer les montants" : "Afficher les montants"}>{amountsVisible ? <EyeOff size={19} /> : <Eye size={19} />}</button></div></section><section className="client-relationships"><div className="section-heading"><div><p>Mes boutiques</p><h3>Relations actives</h3></div><span>{relationships.length}</span></div>{relationships.map((relation) => <button className="relationship-card" key={relation.shopClient.id} onClick={() => onOpenLedger(relation.shopClient.id)}><span className="avatar shop-avatar">{initials(relation.shop.name)}</span><span><strong>{relation.shop.name}</strong><p>Ouvrir le relevé</p></span><b>{amountsVisible ? formatMoney(relation.balance.balanceTotalXof) : "******"}</b><ChevronRight size={17} /></button>)}</section>{relationships.length > 0 ? <div className="client-home-actions"><button className="client-home-credit" onClick={() => onDebt(relationships[0].shopClient.id)}><span className="client-home-credit-icon"><PackagePlus size={20} /></span><span><strong>Acheter à crédit</strong><small>Saisir l'article et le prix</small></span><ChevronRight size={19} /></button><button className="client-home-credit repayment" onClick={() => onRepayment(relationships[0].shopClient.id)}><span className="client-home-credit-icon"><Banknote size={20} /></span><span><strong>Noter un remboursement</strong><small>Paiement remis à la boutique</small></span><ChevronRight size={19} /></button></div> : <NoRelationship />}{recent.length > 0 && <section className="recent-activity"><div className="section-heading"><div><p>Activité récente</p><h3>Dernières opérations</h3></div><button onClick={() => onOpenLedger(recent[0].relation.shopClient.id)}>Voir tout</button></div>{recent.map(({ relation, entry }) => { const amount = signedAmount(entry); return <button className="recent-activity-row" key={entry.id} onClick={() => onOpenLedger(relation.shopClient.id)}><span className={`entry-icon ${amount > 0 ? "debt" : "credit"}`}>{entry.type === "repayment" ? <Banknote size={16} /> : <PackagePlus size={16} />}</span><span><strong>{entry.title}</strong><small>{relation.shop.name} · {dateLabel(entry.recordedAt)}</small></span><b className={amount > 0 ? "debt" : "credit"}>{amountsVisible ? `${amount > 0 ? "+" : "−"}${money.format(Math.abs(amount))}` : "******"}</b></button>; })}</section>}</div>;
+  return <div className="client-dashboard"><div className="client-page-title"><p>Bonjour {firstName}</p><h1>Votre situation</h1></div><button className="client-home-scan" onClick={onScan}><span><QrCode size={21} /></span><span><strong>Scanner une boutique</strong><small>Identifier le QR affiché par le boutiquier</small></span><ChevronRight size={19} /></button><section className="client-summary single"><div className="client-debt-total"><span>Dette totale</span><strong>{amountsVisible ? formatMoney(totalBalance) : "******"}</strong><small>{relationships.length} boutique{relationships.length > 1 ? "s" : ""}</small><button className="balance-visibility" onClick={onToggleAmounts} aria-label={amountsVisible ? "Masquer les montants" : "Afficher les montants"}>{amountsVisible ? <EyeOff size={19} /> : <Eye size={19} />}</button></div></section><section className="client-relationships"><div className="section-heading"><div><p>Mes boutiques</p><h3>Relations actives</h3></div><span>{relationships.length}</span></div>{relationships.map((relation) => <button className="relationship-card" key={relation.shopClient.id} onClick={() => onOpenLedger(relation.shopClient.id)}><span className="avatar shop-avatar">{initials(relation.shop.name)}</span><span><strong>{relation.shop.name}</strong><p>Ouvrir le relevé</p></span><b>{amountsVisible ? formatMoney(relation.balance.balanceTotalXof) : "******"}</b><ChevronRight size={17} /></button>)}</section>{relationships.length > 0 ? <div className="client-home-actions"><button className="client-home-credit" onClick={() => onDebt(relationships[0].shopClient.id)}><span className="client-home-credit-icon"><PackagePlus size={20} /></span><span><strong>Acheter à crédit</strong><small>Saisir l'article et le prix</small></span><ChevronRight size={19} /></button><button className="client-home-credit repayment" onClick={() => onRepayment(relationships[0].shopClient.id)}><span className="client-home-credit-icon"><Banknote size={20} /></span><span><strong>Noter un remboursement</strong><small>Paiement remis à la boutique</small></span><ChevronRight size={19} /></button></div> : <NoRelationship />}{recent.length > 0 && <section className="recent-activity"><div className="section-heading"><div><p>Activité récente</p><h3>Dernières opérations</h3></div><button onClick={() => onOpenLedger(recent[0].relation.shopClient.id)}>Voir tout</button></div>{recent.map(({ relation, entry }) => { const amount = signedAmount(entry); return <button className="recent-activity-row" key={entry.id} onClick={() => onOpenLedger(relation.shopClient.id)}><span className={`entry-icon ${amount > 0 ? "debt" : "credit"}`}>{entry.type === "repayment" ? <Banknote size={16} /> : <PackagePlus size={16} />}</span><span><strong>{entry.title}</strong><small>{relation.shop.name} · {entry.recordedByRole === "client" && entry.sourceChannel === "shop_qr" ? "via QR boutique · " : ""}{dateLabel(entry.recordedAt)}</small></span><b className={amount > 0 ? "debt" : "credit"}>{amountsVisible ? `${amount > 0 ? "+" : "−"}${money.format(Math.abs(amount))}` : "******"}</b></button>; })}</section>}</div>;
 }
 
 function ClientLedger({ relationships, active, amountsVisible, onToggleAmounts, onSelect, onDispute }: { relationships: Relationship[]; active?: Relationship; amountsVisible: boolean; onToggleAmounts: () => void; onSelect: (id: string) => void; onDispute: (entry: LedgerEntry) => void }) {
@@ -508,10 +534,11 @@ function Ledger({ relation, audience, amountsVisible = true, onToggleAmounts, on
 function EntryRow({ entry, audience, amountsVisible = true, onAction }: { entry: LedgerEntry; audience: "shop" | "client"; amountsVisible?: boolean; onAction: () => void }) {
   const amount = signedAmount(entry);
   const actionable = entry.type !== "correction" && (audience === "shop" ? !entry.corrected : entry.disputeState === "none" || entry.disputeState === "opened");
-  return <li className={`entry-row ${entry.disputeState === "opened" ? "is-disputed" : ""}`}><span className={`entry-icon ${entry.disputeState === "opened" ? "flag" : amount > 0 ? "debt" : "credit"}`}>{entry.type === "correction" ? <RotateCcw size={17} /> : entry.disputeState === "opened" ? <CircleAlert size={17} /> : entry.type === "repayment" ? <Banknote size={17} /> : <PackagePlus size={17} />}</span><div className="entry-content"><div className="entry-topline"><strong>{entry.title}</strong><b className={amount > 0 ? "debt" : "credit"}>{amountsVisible ? `${amount > 0 ? "+" : "−"}${money.format(Math.abs(amount))}` : "******"}</b></div>{entry.detail && <p>{entry.detail}</p>}<time>{dateLabel(entry.occurredAt)}, {timeLabel(entry.occurredAt)} · {entry.recordedByRole === "shop" ? "Boutique" : "Client"}</time>{entry.disputeState === "opened" && <><span className="status-tag dispute">Contestée</span>{entry.disputeNote && <p className="entry-note">{entry.disputeNote}</p>}</>}{entry.corrected && <span className="status-tag correction">Corrigée</span>}{actionable && <button className="entry-action" onClick={onAction}>{audience === "shop" ? <><PencilLine size={14} /> Corriger</> : entry.disputeState === "opened" ? "Voir la contestation" : "Contester"}</button>}</div></li>;
+  const provenance = entry.recordedByRole === "shop" ? "Boutique" : entry.sourceChannel === "shop_qr" ? "Client · via QR boutique" : "Client";
+  return <li className={`entry-row ${entry.disputeState === "opened" ? "is-disputed" : ""}`}><span className={`entry-icon ${entry.disputeState === "opened" ? "flag" : amount > 0 ? "debt" : "credit"}`}>{entry.type === "correction" ? <RotateCcw size={17} /> : entry.disputeState === "opened" ? <CircleAlert size={17} /> : entry.type === "repayment" ? <Banknote size={17} /> : <PackagePlus size={17} />}</span><div className="entry-content"><div className="entry-topline"><strong>{entry.title}</strong><b className={amount > 0 ? "debt" : "credit"}>{amountsVisible ? `${amount > 0 ? "+" : "−"}${money.format(Math.abs(amount))}` : "******"}</b></div>{entry.detail && <p>{entry.detail}</p>}<time>{dateLabel(entry.occurredAt)}, {timeLabel(entry.occurredAt)} · {provenance}</time>{entry.disputeState === "opened" && <><span className="status-tag dispute">Contestée</span>{entry.disputeNote && <p className="entry-note">{entry.disputeNote}</p>}</>}{entry.corrected && <span className="status-tag correction">Corrigée</span>}{actionable && <button className="entry-action" onClick={onAction}>{audience === "shop" ? <><PencilLine size={14} /> Corriger</> : entry.disputeState === "opened" ? "Voir la contestation" : "Contester"}</button>}</div></li>;
 }
 
-function OperationForm({ relation, mode, clientMode, onCancel, onDone }: { relation: Relationship; mode: "debt" | "repayment" | string; clientMode?: boolean; onCancel: () => void; onDone: (message: string) => void }) {
+function OperationForm({ relation, mode, clientMode, sourceChannel = "app", onCancel, onDone }: { relation: Relationship; mode: "debt" | "repayment" | string; clientMode?: boolean; sourceChannel?: "app" | "shop_qr"; onCancel: () => void; onDone: (message: string) => void }) {
   const [actualMode, setActualMode] = useState<"debt" | "repayment">(mode === "repayment" ? "repayment" : "debt");
   const [title, setTitle] = useState("");
   const [debtAmount, setDebtAmount] = useState("");
@@ -519,19 +546,25 @@ function OperationForm({ relation, mode, clientMode, onCancel, onDone }: { relat
   const [dueOn, setDueOn] = useState("");
   const [method, setMethod] = useState("Espèces");
   const [duplicate, setDuplicate] = useState(false);
+  const [duplicateOverride, setDuplicateOverride] = useState(false);
+  const [preview, setPreview] = useState<Awaited<ReturnType<typeof api.previewOperation>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const draftId = useRef(crypto.randomUUID());
   const queryClient = useQueryClient();
   const amount = actualMode === "debt" ? debtAmount : repaymentAmount;
   const setAmount = actualMode === "debt" ? setDebtAmount : setRepaymentAmount;
-  const mutation = useMutation({ mutationFn: async (override: boolean) => {
-    const input = { shopClientId: relation.shopClient.id, type: actualMode, title: actualMode === "debt" ? title.trim() : `Remboursement en ${method.toLocaleLowerCase("fr")}`, amountXof: Number(amount), dueOn: actualMode === "debt" && dueOn ? dueOn : null, sourceChannel: clientMode ? "shop_qr" : "app", idempotencyKey: draftId.current, duplicateOverride: override } as const;
-    if (!override) {
-      const preview = await api.previewOperation(input);
-      if (preview.probableDuplicates.length > 0) { setDuplicate(true); return null; }
+  function operationInput(override = duplicateOverride) {
+    return { shopClientId: relation.shopClient.id, type: actualMode, title: actualMode === "debt" ? title.trim() : `Remboursement en ${method.toLocaleLowerCase("fr")}`, amountXof: Number(amount), dueOn: actualMode === "debt" && dueOn ? dueOn : null, sourceChannel, idempotencyKey: draftId.current, duplicateOverride: override } as const;
+  }
+  const mutation = useMutation({ mutationFn: async (action: "prepare" | "confirm" | "force") => {
+    if (action === "prepare") {
+      const nextPreview = await api.previewOperation(operationInput(false));
+      setPreview(nextPreview);
+      if (nextPreview.probableDuplicates.length > 0) { setDuplicate(true); return null; }
+      if (clientMode) return null;
     }
-    return api.recordOperation(input);
+    return api.recordOperation(operationInput(action === "force" || duplicateOverride));
   }, onSuccess: async (result) => {
     if (!result) return;
     const completedDraftId = draftId.current;
@@ -539,6 +572,8 @@ function OperationForm({ relation, mode, clientMode, onCancel, onDone }: { relat
     draftId.current = crypto.randomUUID();
     if (actualMode === "debt") { setTitle(""); setDebtAmount(""); setDueOn(""); } else { setRepaymentAmount(""); }
     setDuplicate(false);
+    setDuplicateOverride(false);
+    setPreview(null);
     setSaved(actualMode === "debt" ? "Achat ajouté au journal" : "Remboursement ajouté au journal");
     await queryClient.invalidateQueries({ queryKey: ["client-home"] });
     await queryClient.invalidateQueries({ queryKey: ["shop-clients"] });
@@ -546,9 +581,12 @@ function OperationForm({ relation, mode, clientMode, onCancel, onDone }: { relat
   }});
   const valid = Number(amount) > 0 && (actualMode === "repayment" || title.trim().length > 0);
   useEffect(() => { if (!valid) return; void saveOperationDraft({ id: draftId.current, shopClientId: relation.shopClient.id, type: actualMode, title: actualMode === "debt" ? title : `Remboursement en ${method.toLocaleLowerCase("fr")}`, amountXof: Number(amount), updatedAt: new Date().toISOString() }); }, [actualMode, amount, method, relation.shopClient.id, title, valid]);
-  async function submit(event: FormEvent) { event.preventDefault(); setError(null); if (!valid) return; try { await mutation.mutateAsync(false); } catch (reason) { setError(errorText(reason)); } }
-  function switchMode(nextMode: "debt" | "repayment") { setActualMode(nextMode); setDuplicate(false); setError(null); setSaved(null); }
-  return <div className="form-surface operation-surface"><ViewHeader title="Nouvelle opération" onBack={onCancel} /><section className="connected-shop"><span className="avatar shop-avatar">{initials(relation.shop.name)}</span><div><small>Boutique sélectionnée</small><strong>{relation.shop.name}</strong></div><span className="verification verified"><BadgeCheck size={14} /> Vérifié</span></section><div className="operation-mode" role="tablist" aria-label="Type d'opération"><button type="button" role="tab" aria-selected={actualMode === "debt"} className={actualMode === "debt" ? "active" : ""} onClick={() => switchMode("debt")}><PackagePlus size={17} /> Achat à crédit</button><button type="button" role="tab" aria-selected={actualMode === "repayment"} className={actualMode === "repayment" ? "active" : ""} onClick={() => switchMode("repayment")}><Banknote size={17} /> Remboursement</button></div>{saved && <div className="operation-saved" role="status"><Check size={18} /><span><strong>{saved}</strong><small>Vous pouvez enregistrer une autre opération.</small></span></div>}<form className="credit-request-form" onSubmit={submit}>{actualMode === "debt" && <Field label="Nom de l'article ou service" value={title} onChange={(value) => { setTitle(value); setSaved(null); }} placeholder="Ex. 2 sachets de lait, 1 pain" autoFocus />}<Field label={actualMode === "debt" ? "Prix total" : "Montant remboursé"} value={amount} onChange={(value) => { setAmount(value); setSaved(null); }} placeholder="0" inputMode="numeric" suffix="FCFA" autoFocus={actualMode === "repayment"} />{actualMode === "debt" ? <Field label="Date prévue (optionnel)" value={dueOn} onChange={setDueOn} type="date" /> : <label className="field"><span>Méthode</span><select value={method} onChange={(event) => setMethod(event.target.value)}><option>Espèces</option><option>Wave</option><option>Orange Money</option><option>Autre</option></select></label>}<DraftNotice />{duplicate && <div className="inline-warning" role="alert"><CircleAlert size={17} /><span>Une opération proche existe déjà. <button type="button" onClick={() => { setDuplicate(false); void mutation.mutate(true); }}>Enregistrer quand même</button></span></div>}{error && <div className="inline-error" role="alert"><CircleAlert size={17} />{error}</div>}<SubmitBar label={mutation.isPending ? "Confirmation…" : actualMode === "debt" ? clientMode ? "Enregistrer l'achat" : "Enregistrer la dette" : "Enregistrer le remboursement"} disabled={!valid || mutation.isPending} /></form></div>;
+  function resetReview() { setPreview(null); setDuplicate(false); setDuplicateOverride(false); setError(null); }
+  async function submit(event: FormEvent) { event.preventDefault(); setError(null); if (!valid) return; try { await mutation.mutateAsync(clientMode && preview ? "confirm" : "prepare"); } catch (reason) { setError(errorText(reason)); } }
+  function changeField(change: () => void) { change(); setSaved(null); resetReview(); }
+  function switchMode(nextMode: "debt" | "repayment") { setActualMode(nextMode); setSaved(null); resetReview(); }
+  const reviewVisible = Boolean(clientMode && preview && !duplicate);
+  return <div className="form-surface operation-surface"><ViewHeader title={reviewVisible ? "Confirmer l'opération" : "Nouvelle opération"} onBack={reviewVisible ? resetReview : onCancel} /><section className="connected-shop"><span className="avatar shop-avatar">{initials(relation.shop.name)}</span><div><small>Boutique sélectionnée</small><strong>{relation.shop.name}</strong></div><span className="verification verified"><BadgeCheck size={14} /> Vérifié</span></section>{reviewVisible && preview ? <form className="operation-review" onSubmit={submit}><div className="operation-review-main"><span>{actualMode === "debt" ? "Achat à crédit" : "Remboursement"}</span><strong>{actualMode === "debt" ? title.trim() : `Remboursement en ${method.toLocaleLowerCase("fr")}`}</strong><b>{formatMoney(Number(amount))}</b>{actualMode === "debt" && dueOn && <small>Prévu pour le {new Date(`${dueOn}T00:00:00`).toLocaleDateString("fr-SN")}</small>}</div><div className="operation-balance-preview"><span><small>Solde actuel</small><strong>{formatMoney(preview.currentBalance.balanceTotalXof)}</strong></span><ChevronRight size={19} /><span><small>Après l'opération</small><strong>{formatMoney(preview.projectedBalance.balanceTotalXof)}</strong></span></div><div className="operation-provenance"><ShieldCheck size={18} /><span><strong>{sourceChannel === "shop_qr" ? "Enregistré par vous via le QR de la boutique" : "Enregistré par vous dans Boutikier"}</strong><small>La boutique verra immédiatement cette provenance et pourra contester l'écriture sans effacer le journal.</small></span></div>{error && <div className="inline-error" role="alert"><CircleAlert size={17} />{error}</div>}<SubmitBar label={mutation.isPending ? "Enregistrement…" : actualMode === "debt" ? "Confirmer l'achat" : "Confirmer le remboursement"} disabled={mutation.isPending} /><button className="text-action review-edit" type="button" onClick={resetReview}>Modifier les informations</button></form> : <><div className="operation-mode" role="tablist" aria-label="Type d'opération"><button type="button" role="tab" aria-selected={actualMode === "debt"} className={actualMode === "debt" ? "active" : ""} onClick={() => switchMode("debt")}><PackagePlus size={17} /> Achat à crédit</button><button type="button" role="tab" aria-selected={actualMode === "repayment"} className={actualMode === "repayment" ? "active" : ""} onClick={() => switchMode("repayment")}><Banknote size={17} /> Remboursement</button></div>{saved && <div className="operation-saved" role="status"><Check size={18} /><span><strong>{saved}</strong><small>Vous pouvez enregistrer une autre opération.</small></span></div>}<form className="credit-request-form" onSubmit={submit}>{actualMode === "debt" && <Field label="Nom de l'article ou service" value={title} onChange={(value) => changeField(() => setTitle(value))} placeholder="Ex. 2 sachets de lait, 1 pain" autoFocus />}<Field label={actualMode === "debt" ? "Prix total" : "Montant remboursé"} value={amount} onChange={(value) => changeField(() => setAmount(value))} placeholder="0" inputMode="numeric" suffix="FCFA" autoFocus={actualMode === "repayment"} />{actualMode === "debt" ? <Field label="Date prévue (optionnel)" value={dueOn} onChange={(value) => changeField(() => setDueOn(value))} type="date" /> : <label className="field"><span>Méthode</span><select value={method} onChange={(event) => changeField(() => setMethod(event.target.value))}><option>Espèces</option><option>Wave</option><option>Orange Money</option><option>Autre</option></select></label>}<DraftNotice />{duplicate && <div className="inline-warning" role="alert"><CircleAlert size={17} /><span>Une opération proche existe déjà. <button type="button" onClick={() => { setDuplicate(false); setDuplicateOverride(true); if (!clientMode) void mutation.mutate("force"); }}>Continuer malgré le doublon</button></span></div>}{error && <div className="inline-error" role="alert"><CircleAlert size={17} />{error}</div>}<SubmitBar label={mutation.isPending ? "Vérification…" : clientMode ? "Voir le récapitulatif" : actualMode === "debt" ? "Enregistrer la dette" : "Enregistrer le remboursement"} disabled={!valid || mutation.isPending} /></form></>}</div>;
 }
 
 function CorrectionForm({ relation, entryId, onCancel, onDone }: { relation: Relationship; entryId: string; onCancel: () => void; onDone: (message: string) => void }) {
@@ -583,18 +621,18 @@ function PublicStatement() {
   return <div className="client-statement-app"><header className="client-portal-header"><div className="brand-lockup"><span className="brand-mark"><BrandLogo /></span><div><strong>Boutikier</strong><span>Relevé client</span></div></div><span className="private-link-badge"><ShieldCheck size={15} /> Lien privé</span></header><main className="client-statement-shell"><div className="ledger-view"><section className="identity-block"><span className="avatar large">{initials(statement.client.name)}</span><div className="identity-copy"><h2>{statement.client.name}</h2><p>{statement.shop.name}</p><span>Lecture seule</span></div><span className="verification"><ShieldCheck size={15} /> Lecture seule</span></section><section className="balance-card"><div className="balance-heading"><span>Solde enregistré</span><span>Valable jusqu'au {new Date(statement.validUntil).toLocaleDateString("fr-SN")}</span></div><div className="balance-total">{formatMoney(statement.balance.balanceTotalXof)} <small>FCFA</small></div><div className="balance-breakdown"><span><i className="dot clear" />Non contesté <strong>{money.format(statement.balance.balanceClearXof)}</strong></span>{statement.balance.balanceDisputedXof !== 0 && <span><i className="dot disputed" />Contesté <strong>{money.format(statement.balance.balanceDisputedXof)}</strong></span>}</div></section><section className="journal-section"><div className="section-heading"><div><p>Historique</p><h3>Journal</h3></div><span>{statement.timeline.length} événement{statement.timeline.length > 1 ? "s" : ""}</span></div><ol className="journal-list">{statement.timeline.map((event) => <li className="entry-row" key={event.eventId}><span className={`entry-icon ${event.amountXof && event.amountXof > 0 ? "debt" : "credit"}`}><ReceiptText size={17} /></span><div className="entry-content"><div className="entry-topline"><strong>{event.title || event.kind}</strong>{event.amountXof !== null && <b className={event.amountXof > 0 ? "debt" : "credit"}>{event.amountXof > 0 ? "+" : "−"}{money.format(Math.abs(event.amountXof))}</b>}</div>{event.detail && <p>{event.detail}</p>}<time>{dateLabel(event.eventAt)}, {timeLabel(event.eventAt)}</time></div></li>)}</ol></section></div><div className="shared-account-cta"><div><strong>Vous avez déjà un compte ?</strong><p>Retrouvez toutes vos boutiques dans votre espace personnel.</p></div><Link to="/client">Ouvrir mon espace</Link></div></main></div>;
 }
 
-function QrLanding() {
+function QrLanding({ session }: { session: AuthSession | null }) {
   const location = useLocation();
   const code = decodeURIComponent(location.pathname.slice("/q/s/".length));
   const navigate = useNavigate();
-  const { session } = useAuth();
   const resolve = useQuery({ queryKey: ["resolve-qr", code], queryFn: () => api.resolveShopQr(code), retry: false });
   const context = useQuery({ queryKey: ["me", session?.user.id ?? null], queryFn: api.me, enabled: Boolean(session) });
-  const connect = useMutation({ mutationFn: () => api.connectShop(code), onSuccess: (result) => navigate(`/client?shopClientId=${result.shopClientId}&tab=credit`, { replace: true }) });
+  const connect = useMutation({ mutationFn: () => api.connectShop(code), onSuccess: (result) => navigate(`/client?shopClientId=${result.shopClientId}&tab=credit&source=shop_qr`, { replace: true }) });
   if (resolve.isLoading) return <Loading label="Vérification de la boutique…" />;
   if (resolve.error || !resolve.data) return <div className="statement-unavailable"><QrCode size={30} /><h1>QR indisponible</h1><p>Ce code est invalide ou a été révoqué par la boutique.</p></div>;
-  if (!session) return <div className="qr-confirm-page"><QrCode size={35} /><p className="panel-heading-kicker">Boutique trouvée</p><h1>{resolve.data.shopName}</h1><p>Connectez-vous avec votre numéro vérifié pour enregistrer une opération avec cette boutique.</p><Link className="primary-action" to={`/connexion?returnTo=${encodeURIComponent(location.pathname)}`}>Se connecter</Link></div>;
+  if (!session) return <div className="qr-confirm-page"><QrCode size={35} /><p className="panel-heading-kicker">Boutique trouvée</p><h1>{resolve.data.shopName}</h1><p>Aucune application n'est nécessaire. Vérifiez votre téléphone pour créer ou retrouver votre compte client léger et enregistrer votre achat.</p><Link className="primary-action" to={`/connexion?returnTo=${encodeURIComponent(location.pathname)}`}>Continuer avec mon numéro</Link></div>;
   if (context.isLoading) return <Loading />;
+  if (context.data?.needsOnboarding) return <NavigateTo to={`/connexion?returnTo=${encodeURIComponent(location.pathname)}`} />;
   if (!context.data?.client) return <AccessDenied label="Seul un client vérifié peut se connecter à une boutique par QR." />;
   return <div className="qr-confirm-page"><QrCode size={35} /><p className="panel-heading-kicker">Confirmer la boutique</p><h1>{resolve.data.shopName}</h1><p>Vous êtes sur le point d'ajouter cette boutique à vos relations.</p>{connect.error && <div className="inline-error"><CircleAlert size={17} />{errorText(connect.error)}</div>}<button className="primary-action" onClick={() => connect.mutate()} disabled={connect.isPending}>{connect.isPending ? "Connexion…" : "Confirmer et continuer"}<ChevronRight size={18} /></button><Link className="text-action" to="/client">Annuler</Link></div>;
 }

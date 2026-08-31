@@ -1,6 +1,6 @@
 # Current State
 
-- Production: `https://boutikier.guydorveilmalonga.workers.dev`.
+- Production: `https://boutikier.dorveilsn.workers.dev`.
 - Supabase production: project `boutikier`, ref `jkbxrsjdkgjbuxheustn`, Paris `eu-west-3`.
 - Cloudflare: Worker `boutikier`; SPA, API and cron outbox share one deployment.
 - Surfaces: boutique `/`, client `/client`, statement read-only `/s/:token`.

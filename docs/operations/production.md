@@ -5,7 +5,7 @@
 | Service | Ressource | Région / URL |
 | --- | --- | --- |
 | Supabase | `boutikier` (`jkbxrsjdkgjbuxheustn`) | Paris `eu-west-3` |
-| Cloudflare | Worker `boutikier` | `https://boutikier.guydorveilmalonga.workers.dev` |
+| Cloudflare | Worker `boutikier` | `https://boutikier.dorveilsn.workers.dev` |
 | Git | dépôt privé Boutikier | branche protégée par CI |
 
 Le compte Cloudflare ne contient actuellement aucune zone DNS. Le sous-domaine `workers.dev`
@@ -41,8 +41,8 @@ npm run deploy --workspace @boutikier/server
 Après chaque déploiement :
 
 ```powershell
-Invoke-WebRequest https://boutikier.guydorveilmalonga.workers.dev/api/health
-npm run load:smoke -- https://boutikier.guydorveilmalonga.workers.dev/api/health
+Invoke-WebRequest https://boutikier.dorveilsn.workers.dev/api/health
+npm run load:smoke -- https://boutikier.dorveilsn.workers.dev/api/health
 ```
 
 Vérifier aussi `/`, `/client`, `/connexion`, les en-têtes CSP/HSTS et qu'un appel anonyme à

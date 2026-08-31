@@ -8,7 +8,7 @@ Boutikier est un monorepo npm :
 - `packages/contracts`: shared Zod boundary contracts.
 - `supabase`: local configuration, migrations, and database tests.
 
-Production : [boutikier.guydorveilmalonga.workers.dev](https://boutikier.guydorveilmalonga.workers.dev)
+Production : [boutikier.dorveilsn.workers.dev](https://boutikier.dorveilsn.workers.dev)
 
 Utiliser Node.js 22 ou plus récent. La vérification reproductible est :
 

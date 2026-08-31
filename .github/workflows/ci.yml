@@ -19,6 +19,21 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: supabase start
+      - name: Configure local application environment
+        shell: bash
+        run: |
+          eval "$(supabase status -o env)"
+          {
+            printf 'SUPABASE_PUBLISHABLE_KEY=%s\n' "$PUBLISHABLE_KEY"
+            printf 'SUPABASE_SECRET_KEY=%s\n' "$SECRET_KEY"
+            printf 'APP_HMAC_SECRET=%s\n' 'ci-only-hmac-secret-with-at-least-32-bytes'
+            printf 'APP_ORIGIN=%s\n' 'http://127.0.0.1:4176'
+          } > apps/server/.dev.vars
+          {
+            printf 'VITE_SUPABASE_URL=%s\n' "$API_URL"
+            printf 'VITE_SUPABASE_PUBLISHABLE_KEY=%s\n' "$PUBLISHABLE_KEY"
+            printf 'VITE_API_BASE_URL=%s\n' 'http://127.0.0.1:8790'
+          } > apps/web/.env.local
       - run: npm run build
       - run: npm test
       - run: npm run test:runtime

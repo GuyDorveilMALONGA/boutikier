@@ -1,0 +1,32 @@
+{
+  "name": "boutikier",
+  "private": true,
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "check:context": "node scripts/check-context.mjs",
+    "check:runtime": "npm run check:runtime --workspace @boutikier/prototype",
+    "dev:prototype": "npm run dev --workspace @boutikier/prototype",
+    "dev:web": "npm run dev --workspace @boutikier/web",
+    "dev:server": "npm run dev --workspace @boutikier/server",
+    "seed:demo": "node scripts/seed-demo-accounts.mjs",
+    "backup:production": "node scripts/backup-production.mjs",
+    "load:smoke": "node scripts/load-smoke.mjs",
+    "build:prototype": "npm run build --workspace @boutikier/prototype",
+    "build:web": "npm run build --workspace @boutikier/web",
+    "build:server": "npm run build --workspace @boutikier/server",
+    "build:contracts": "npm run build --workspace @boutikier/contracts",
+    "build": "npm run check:context && npm run build:contracts && npm run build:prototype && npm run build:web && npm run build:server",
+    "test:runtime": "npm run test:runtime --workspace @boutikier/prototype",
+    "test:sites": "npm run test:sites --workspace @boutikier/prototype",
+    "test:web": "npm run test:e2e --workspace @boutikier/web",
+    "test:server": "npm run test --workspace @boutikier/server",
+    "test": "npm run check:context && npm run build:contracts && npm run test:sites && npm run test:server && npm run test:web"
+  }
+}

@@ -1,0 +1,8 @@
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_replace_me
+SUPABASE_SECRET_KEY=sb_secret_replace_me
+APP_HMAC_SECRET=replace_with_a_random_32_byte_secret
+APP_ORIGIN=http://127.0.0.1:8787
+# Optional transactional WhatsApp delivery settings.
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_WHATSAPP_FROM=

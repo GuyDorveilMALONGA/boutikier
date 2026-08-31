@@ -1,0 +1,29 @@
+{
+  "name": "@boutikier/server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev --config wrangler.jsonc --var SUPABASE_URL:http://127.0.0.1:56321 --var APP_ORIGIN:http://127.0.0.1:8787",
+    "deploy": "wrangler deploy --config wrangler.jsonc --strict",
+    "dev:node": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@boutikier/contracts": "0.1.0",
+    "@hono/node-server": "2.1.1",
+    "hono": "^4.13.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260830.1",
+    "@types/node": "22.20.1",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "wrangler": "4.127.1"
+  }
+}

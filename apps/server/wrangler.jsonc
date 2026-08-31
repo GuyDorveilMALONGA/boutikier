@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "boutikier",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-30",
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/*",
+      "!/assets/*",
+      "!/apple-touch-icon.png",
+      "!/favicon-64.png",
+      "!/icon-192.png",
+      "!/icon-512.png",
+      "!/icon-maskable-512.png",
+      "!/manifest.webmanifest",
+      "!/sw.js"
+    ]
+  },
+  "triggers": {
+    "crons": ["*/2 * * * *"]
+  },
+  "vars": {
+    "SUPABASE_URL": "https://jkbxrsjdkgjbuxheustn.supabase.co"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

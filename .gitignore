@@ -1,0 +1,14 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+.env
+.env.*
+!.env.example
+!.env.*.example
+!apps/web/.env.production
+apps/server/.dev.vars
+apps/server/.dev.vars.*
+!apps/server/.dev.vars.example
+.wrangler/
+.artifacts/

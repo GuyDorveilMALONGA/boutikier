@@ -153,6 +153,7 @@ test.beforeAll(async () => {
 });
 
 test("the four-digit local demo PIN opens real client and shop accounts", async ({ page }) => {
+  await new Promise((resolve) => setTimeout(resolve, 5_100));
   await demoLoginThroughUi(page, DEMO_CLIENT_PHONE);
   await expect(page.getByRole("heading", { name: "Votre situation" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Boutique Démo/ })).toBeVisible();

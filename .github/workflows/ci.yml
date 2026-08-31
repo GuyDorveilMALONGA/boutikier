@@ -32,7 +32,7 @@ jobs:
           {
             printf 'VITE_SUPABASE_URL=%s\n' "$API_URL"
             printf 'VITE_SUPABASE_PUBLISHABLE_KEY=%s\n' "$PUBLISHABLE_KEY"
-            printf 'VITE_API_BASE_URL=%s\n' 'http://127.0.0.1:8790'
+            printf 'VITE_API_BASE_URL=%s\n' ''
           } > apps/web/.env.local
       - run: npm run build
       - run: npm test

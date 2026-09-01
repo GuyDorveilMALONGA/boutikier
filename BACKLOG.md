@@ -54,6 +54,24 @@ QR boutique permanent
 - [x] Couvrir par des tests serveur et PostgreSQL l'isolation inter-boutiques, la révocation du QR, le rattachement de la relation, l'autorité de l'acteur et la provenance du journal.
 - [ ] Vérifier la totalité du flux sur mobile installé en PWA et dans un navigateur sans application installée.
 
+## Retours du test physique — accueil client et réactivité PWA
+
+### Hiérarchie visuelle
+
+- [x] Recomposer l'accueil client à partir des visuels de référence : solde, trois actions minimales, relations et activité récente forment une seule hiérarchie compacte.
+- [x] Conserver volontairement l'espace libre de l'état sans boutique ; ne pas le traiter comme un défaut à remplir. Corriger uniquement la hiérarchie visuelle qui l'entoure.
+- [x] Unifier la barre système et le header pour supprimer l'impression de double bande verte et respecter la safe area supérieure iOS.
+- [x] Supprimer la navigation inférieure client et placer la navigation boutique au-dessus de la safe area et de l'indicateur d'accueil iOS.
+- [x] Ne masquer la navigation racine boutique que lorsqu'un véritable écran focalisé ou formulaire est ouvert ; Acheter et Rembourser sans relation renvoient vers le scanner.
+- [x] Donner aux écrans focalisés une navigation native cohérente : bouton retour dans le header, historique de route réel et geste de retour iOS lorsque le navigateur/PWA le permet.
+
+### Mise à jour sans rechargement
+
+- [x] Garantir transactionnellement un QR actif pendant le premier onboarding boutique et précharger le contexte/QR sans rechargement de la PWA.
+- [x] Après le renouvellement du QR ou la modification du nom, afficher automatiquement le QR et le nom courant sans rechargement.
+- [x] Après qu'un client a scanné le QR ou confirmé une opération, mettre à jour automatiquement le carnet et l'activité du boutiquier sans rechargement manuel.
+- [x] Couvrir ces transitions par des tests PWA : création boutique → QR disponible, scan client → client visible côté boutique, opération client → activité boutique visible sur un second contexte déjà ouvert.
+
 ### Explicitement hors périmètre
 
 - Formulaire anonyme créant directement une dette.

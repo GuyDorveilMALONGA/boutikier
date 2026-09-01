@@ -20,15 +20,18 @@
 | D016 | A real-world credit exchange is recorded immediately after server confirmation | The physical exchange is the agreement; digital counterparty approval is optional and never blocks the balance. |
 | D017 | The shop app is task-first with a compact accounting summary and one visible entry point per command | Time-poor, non-technical shopkeepers must see essential figures and actions directly without duplicated commands or navigation to explore. |
 | D018 | Both parties record free-form articles and an amount directly into the journal | There is no synchronized catalog and either participant may document the real-world exchange. |
-| D019 | Only clients have a relationship-specific trust score | The score explains repayment behavior but never grants or refuses credit automatically. |
+| D019 | A client has one relationship-specific trust score visible to that client and to the owning shop | The score explains repayment behavior, stays isolated from other shops, and never grants or refuses credit automatically. |
 | D020 | Both parties may record debts and repayments | Each confirmed write updates the journal immediately and notifies the counterparty. |
 | D021 | Shop QR codes are permanent and revocable; client QR codes are temporary and post-MVP | QR identifies a counterparty but never contains financial data or authorizes an operation. |
 | D022 | Repayments are allocated FIFO through immutable allocation events | The rule is deterministic, needs no extra input, and can be reversed without rewriting history. |
-| D023 | Trust score v1 stays `new` until three eligible debts are settled | The score is client-only, relationship-scoped, explainable, and advisory; its weights may be versioned later. |
+| D023 | Trust score v1 stays `new` until three eligible debts are settled | The score is relationship-scoped, explainable, advisory, and readable only by the client and owning shop; its weights may be versioned later. |
 | D024 | Probable duplicates return `409` before insertion and may be explicitly overridden | Idempotency handles retries; this second guard handles the same exchange entered by both parties. |
 | D025 | The shop app has three roots: `Carnet`, `Activité`, and `Compte` | Mobile uses a bottom bar; desktop uses header navigation. Child screens have one contextual back action, and focused forms hide root navigation. |
 | D026 | Permanent shop QR values are HMAC-signed and only their SHA-256 hash is stored | A QR can be reproduced from its opaque ID without persisting a reusable raw credential or exposing an internal UUID alone. |
 | D027 | The production web app is installable as a PWA, but financial API responses are never cached | Static shell assets may work offline while balances and journals always come from an authenticated, current server response. |
 | D028 | A visitor entering through a shop QR creates or restores a lightweight Supabase Auth client through phone OTP, then records only after an explicit financial preview | Anonymous journal writes remain forbidden; the verified client is accountable and shop approval does not block a confirmed real-world exchange. |
+| D029 | A completed shop onboarding transaction always owns one active permanent QR | The Worker signs the opaque value and the onboarding RPC creates the shop and its first code atomically; retries never rotate an existing active code. |
+| D030 | Client secondary screens use browser routes and the client home has no root bottom navigation | Browser history provides native back behavior where supported; a visible back control remains the reliable fallback. |
+| D031 | Visible shop data refreshes adaptively through authenticated no-store API queries | The MVP bounds cross-device freshness without exposing financial tables to browser Realtime subscriptions; polling pauses in the background and resumes on focus or reconnect. |
 
 When a decision changes, replace its active row in the same change. Do not append obsolete decisions here.

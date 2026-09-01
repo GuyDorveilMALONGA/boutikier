@@ -59,6 +59,64 @@ test("business routes require a Supabase bearer token", async () => {
   assert.deepEqual(await response.json(), { error: "authentication_required" });
 });
 
+test("shop onboarding creates its first signed QR in the same command", async () => {
+  const originalFetch = globalThis.fetch;
+  let onboardingBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (input, init) => {
+    const pathname = new URL(String(input)).pathname;
+    if (pathname.endsWith("/rpc/complete_shop_onboarding_with_code")) {
+      onboardingBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({
+        id: "11111111-1111-4111-8111-111111111111",
+        name: "Chez Awa",
+        phone_e164: "+221703549365",
+        currency_code: "XOF",
+      });
+    }
+    if (pathname.endsWith("/rpc/get_actor_context")) {
+      return Response.json({
+        auth_user_id: "22222222-2222-4222-8222-222222222222",
+        phone_e164: "+221703549365",
+        shop: {
+          id: "11111111-1111-4111-8111-111111111111",
+          name: "Chez Awa",
+          phone_e164: "+221703549365",
+          currency_code: "XOF",
+        },
+        client: null,
+        default_audience: "shop",
+        needs_onboarding: false,
+      });
+    }
+    return Response.json({ error: "unexpected_rpc" }, { status: 500 });
+  };
+
+  try {
+    const response = await createApp().request(
+      "/api/onboarding/shop",
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer user-jwt",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: "Chez Awa" }),
+      },
+      env,
+    );
+
+    assert.equal(response.status, 201);
+    assert.equal(onboardingBody?.p_name, "Chez Awa");
+    assert.match(String(onboardingBody?.p_code_id), /^[0-9a-f-]{36}$/);
+    assert.match(String(onboardingBody?.p_code_hash), /^[0-9a-f]{64}$/);
+    assert.match(String(onboardingBody?.p_code_prefix), /^[0-9a-f]{8}$/);
+    assert.equal(JSON.stringify(onboardingBody).includes("b1."), false);
+    assert.equal((await response.json() as { shop: { name: string } }).shop.name, "Chez Awa");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("records an operation through the transaction RPC", async () => {
   const originalFetch = globalThis.fetch;
   let rpcBody: Record<string, unknown> | undefined;

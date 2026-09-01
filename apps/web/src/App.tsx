@@ -1,8 +1,8 @@
 import {
   ArrowLeft, BadgeCheck, Banknote, BookOpen, Check, ChevronRight, CircleAlert,
   Copy, Eye, EyeOff, History, Home, LogOut, MessageCircle, PackagePlus, PencilLine,
-  Plus, QrCode, ReceiptText, RotateCcw, Search, Send, ShieldCheck, Smartphone,
-  Store, UserPlus, X,
+  Plus, QrCode, ReceiptText, RotateCcw, Search, Send, Settings, ShieldCheck, Smartphone,
+  Store, UserPlus, WifiOff, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { IScannerControls } from "@zxing/browser";
@@ -16,6 +16,8 @@ import { api, ApiError } from "./lib/api";
 import { removeOperationDraft, saveOperationDraft } from "./lib/drafts";
 import { supabase, supabaseConfig, type AuthSession } from "./lib/supabase";
 import { useAuth } from "./lib/use-auth";
+import { useOnlineStatus, useRefreshOnResume, visibleLiveQuery } from "./lib/live-query";
+import { ShopQrCard } from "./components/ShopQrCard";
 
 const money = new Intl.NumberFormat("fr-FR");
 const queryClient = new QueryClient({
@@ -45,6 +47,10 @@ function dateLabel(value: string) {
 
 function timeLabel(value: string) {
   return new Date(value).toLocaleTimeString("fr-SN", { hour: "2-digit", minute: "2-digit" });
+}
+
+function trustLabel(status: "new" | "reliable" | "regular" | "watch") {
+  return status === "reliable" ? "Fiable" : status === "regular" ? "Régulier" : status === "watch" ? "À surveiller" : "Nouveau";
 }
 
 function phoneE164(value: string) {
@@ -196,6 +202,10 @@ function AuthPage() {
       }
       savePendingSignup(null);
       if (result.data.user) queryClient.setQueryData(["me", result.data.user.id], next);
+      if (next.shop) {
+        await queryClient.invalidateQueries({ queryKey: ["shop-qr"] });
+        await queryClient.prefetchQuery({ queryKey: ["shop-qr"], queryFn: api.shopQr });
+      }
       if (isQrReturn && next.needsOnboarding) return;
       const destination = returnTo !== "/" ? returnTo : next.client && !next.shop ? "/client" : "/";
       navigate(destination, { replace: true });
@@ -302,7 +312,12 @@ function OnboardingPage({ context }: { context: ActorContext }) {
     mutationFn: () => audience === "shop" ? api.onboardShop(name) : api.onboardClient(name),
     onSuccess: async (next) => {
       savePendingSignup(null);
+      queryClient.setQueryData(["me"], next);
       await queryClient.invalidateQueries({ queryKey: ["me"] });
+      if (next.shop) {
+        await queryClient.invalidateQueries({ queryKey: ["shop-qr"] });
+        await queryClient.prefetchQuery({ queryKey: ["shop-qr"], queryFn: api.shopQr });
+      }
       navigate(isQrOnboarding && next.client ? returnTo : next.shop ? "/" : "/client", { replace: true });
     },
   });
@@ -367,7 +382,8 @@ function NavigateTo({ to }: { to: string }) {
 }
 
 function ErrorState({ error }: { error: unknown }) {
-  return <div className="app-state"><CircleAlert size={28} /><h1>Impossible de charger cet espace</h1><p>{errorText(error)}</p><button className="secondary-action" onClick={() => window.location.reload()}>Réessayer</button></div>;
+  const queryClient = useQueryClient();
+  return <div className="app-state"><CircleAlert size={28} /><h1>Impossible de charger cet espace</h1><p>{errorText(error)}</p><button className="secondary-action" onClick={() => { void queryClient.refetchQueries({ type: "active" }); }}>Réessayer</button></div>;
 }
 
 function AccessDenied({ label }: { label: string }) {
@@ -379,16 +395,19 @@ function ShopApp({ context }: { context: ActorContext }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [query, setQuery] = useState("");
-  const [period, setPeriod] = useState<"today" | "7d" | "month" | "all">("today");
   const [toast, setToast] = useState<string | null>(null);
   const pathParts = location.pathname.split("/").filter(Boolean);
-  const selectedId = pathParts[0] === "clients" ? pathParts[1] : null;
+  const creatingClient = pathParts[0] === "clients" && pathParts[1] === "nouveau";
+  const selectedId = pathParts[0] === "clients" && pathParts[1] !== "nouveau" ? pathParts[1] : null;
   const subScreen = selectedId ? pathParts[2] || "ledger" : null;
   const targetEntryId = subScreen === "correction" ? pathParts[3] : null;
   const tab = location.pathname.startsWith("/activite") ? "activity" : location.pathname.startsWith("/compte") ? "account" : "carnet";
-  const clientsQuery = useQuery({ queryKey: ["shop-clients", query], queryFn: () => api.shopClients(query) });
-  const summaryQuery = useQuery({ queryKey: ["shop-summary", period], queryFn: () => api.shopSummary(period) });
-  const relationQuery = useQuery({ queryKey: ["shop-relationship", selectedId], queryFn: () => api.shopRelationship(selectedId!), enabled: Boolean(selectedId) });
+  const clientsQuery = useQuery({ queryKey: ["shop-clients", query], queryFn: () => api.shopClients(query), ...visibleLiveQuery });
+  const summaryQuery = useQuery({ queryKey: ["shop-summary", "all"], queryFn: () => api.shopSummary("all"), ...visibleLiveQuery });
+  const relationQuery = useQuery({ queryKey: ["shop-relationship", selectedId], queryFn: () => api.shopRelationship(selectedId!), enabled: Boolean(selectedId), ...visibleLiveQuery });
+  const refreshKeys = useMemo(() => [["shop-clients"], ["shop-summary"], ["shop-activity"], ["shop-qr"]], []);
+  useRefreshOnResume(refreshKeys);
+  const online = useOnlineStatus();
 
   function notify(message: string) {
     setToast(message);
@@ -402,12 +421,12 @@ function ShopApp({ context }: { context: ActorContext }) {
       queryClient.invalidateQueries({ queryKey: ["shop-relationship", selectedId] }),
     ]);
   }
-  const nested = Boolean(selectedId);
+  const nested = Boolean(selectedId || creatingClient);
   const client = clientsQuery.data?.items.find((item) => item.id === selectedId) ?? relationQuery.data?.shopClient;
 
   return <div className={`app-shell shop-shell ${nested ? "shop-focus-mode" : ""}`}>
     <header className={`app-header ${nested ? "is-nested" : ""}`}>
-      {nested ? <button className="shop-header-back" onClick={() => navigate("/")} aria-label="Retour aux clients"><ArrowLeft size={21} /><span>{client?.name || "Client"}</span></button> : <div className="brand-lockup"><span className="brand-mark"><BrandLogo /></span><div><strong>Boutikier</strong><span>{context.shop?.name}</span></div></div>}
+      {nested ? <><button className="shop-header-back" onClick={() => navigate("/")} aria-label="Retour"><ArrowLeft size={23} /></button><strong className="nested-header-title">{creatingClient ? "Nouvelle fiche" : client?.name || "Client"}</strong><span className="header-balance" /></> : <div className="brand-lockup"><span className="brand-mark"><BrandLogo /></span><div><strong>{context.shop?.name}</strong><span>Espace boutique</span></div></div>}
       {!nested && <strong className="shop-mobile-title">{tab === "activity" ? "Activité" : tab === "account" ? "Compte" : "Carnet"}</strong>}
       <nav className="shop-desktop-nav" aria-label="Navigation boutique">
         <ShopNavButton active={tab === "carnet"} icon={<BookOpen size={17} />} label="Carnet" onClick={() => navigate("/")} />
@@ -416,17 +435,19 @@ function ShopApp({ context }: { context: ActorContext }) {
       </nav>
     </header>
 
-    {tab === "activity" ? <ShopActivity /> : tab === "account" ? <ShopAccount context={context} notify={notify} /> : <div className={`workspace ${selectedId ? "has-selection" : ""}`}>
+    {!online && <div className="offline-banner" role="status"><WifiOff size={15} /> Hors ligne · les données se resynchroniseront automatiquement</div>}
+    {tab === "activity" ? <ShopActivity /> : tab === "account" ? <ShopAccount context={context} notify={notify} /> : <div className={`workspace ${nested ? "has-selection" : ""}`}>
       <aside className="client-panel" aria-label="Clients">
-        <div className="panel-heading"><div><p>Carnet</p><h1>Clients</h1></div><button className="icon-command" aria-label="Nouveau client" onClick={() => navigate("/clients/nouveau")}><UserPlus size={19} /></button></div>
-        <div className="summary-period" role="group" aria-label="Période du résumé">{([['today', "Aujourd'hui"], ['7d', "7 jours"], ['month', "Mois"], ['all', "Tout"]] as const).map(([value, label]) => <button key={value} className={period === value ? "active" : ""} onClick={() => setPeriod(value)}>{label}</button>)}</div>
-        <section className="shop-summary" aria-label="Résumé de la boutique"><SummaryMetric label="À recevoir" value={summaryQuery.data ? formatMoney(Math.max(summaryQuery.data.balanceTotalXof, 0)) : "…"} /><SummaryMetric label="Remboursé" value={summaryQuery.data ? formatMoney(summaryQuery.data.repaidXof) : "…"} tone="green" /><SummaryMetric label="Crédit accordé" value={summaryQuery.data ? formatMoney(summaryQuery.data.creditGrantedXof) : "…"} /><SummaryMetric label="Contesté" value={summaryQuery.data ? formatMoney(summaryQuery.data.balanceDisputedXof) : "…"} /></section>
+        <div className="carnet-intro"><p>Votre carnet</p><h1>{context.shop?.name}</h1></div>
+        <section className="carnet-balance-card" aria-label="Montant global à recevoir"><span>À recevoir</span><strong>{summaryQuery.data ? formatMoney(Math.max(summaryQuery.data.balanceTotalXof, 0)) : "…"}</strong><small>{summaryQuery.data?.activeClients ?? 0} client{(summaryQuery.data?.activeClients ?? 0) > 1 ? "s" : ""} actif{(summaryQuery.data?.activeClients ?? 0) > 1 ? "s" : ""}{summaryQuery.data?.balanceDisputedXof ? ` · ${formatMoney(summaryQuery.data.balanceDisputedXof)} contestés` : ""}</small></section>
+        <ShopQrCard shopName={context.shop?.name ?? "Votre boutique"} />
+        <div className="panel-heading carnet-list-heading"><div><p>Journal</p><h2>Clients qui doivent</h2></div><button className="icon-command" aria-label="Nouveau client" onClick={() => navigate("/clients/nouveau")}><UserPlus size={19} /></button></div>
         <label className="search-field"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher un client" />{query && <button aria-label="Effacer la recherche" onClick={() => setQuery("")}><X size={15} /></button>}</label>
         {clientsQuery.isLoading ? <Loading label="Chargement des clients…" /> : clientsQuery.error ? <ErrorState error={clientsQuery.error} /> : <div className="client-list">{clientsQuery.data?.items.map((item) => <ClientRow key={item.id} client={item} selected={item.id === selectedId} onSelect={() => navigate(`/clients/${item.id}`)} />)}{clientsQuery.data?.items.length === 0 && <div className="list-empty">Aucun client ne correspond.</div>}</div>}
         <button className="primary-action new-client-wide" onClick={() => navigate("/clients/nouveau")}><Plus size={18} /> Nouveau client</button>
       </aside>
       <main className="detail-panel">
-        {pathParts[0] === "clients" && pathParts[1] === "nouveau" ? <NewClientForm onCancel={() => navigate("/")} onCreated={(created) => { invalidate(); navigate(`/clients/${created.id}`); notify("Fiche client créée"); }} /> : selectedId && relationQuery.isLoading ? <Loading /> : selectedId && relationQuery.error ? <ErrorState error={relationQuery.error} /> : relationQuery.data ? <ShopRelationship relation={relationQuery.data} screen={subScreen!} targetEntryId={targetEntryId} onNavigate={(to) => navigate(`/clients/${selectedId}${to ? `/${to}` : ""}`)} onDone={(message) => { invalidate(); notify(message); navigate(`/clients/${selectedId}`); }} /> : <Welcome hasClients={(clientsQuery.data?.items.length ?? 0) > 0} />}
+        {creatingClient ? <NewClientForm onCancel={() => navigate("/")} onCreated={(created) => { invalidate(); navigate(`/clients/${created.id}`); notify("Fiche client créée"); }} /> : selectedId && relationQuery.isLoading ? <Loading /> : selectedId && relationQuery.error ? <ErrorState error={relationQuery.error} /> : relationQuery.data ? <ShopRelationship relation={relationQuery.data} screen={subScreen!} targetEntryId={targetEntryId} onNavigate={(to) => navigate(`/clients/${selectedId}${to ? `/${to}` : ""}`)} onDone={(message) => { invalidate(); notify(message); navigate(`/clients/${selectedId}`); }} /> : <Welcome hasClients={(clientsQuery.data?.items.length ?? 0) > 0} />}
       </main>
     </div>}
     {!nested && <nav className="shop-bottom-nav" aria-label="Navigation boutique mobile"><ShopNavButton active={tab === "carnet"} icon={<BookOpen size={19} />} label="Carnet" onClick={() => navigate("/")} /><ShopNavButton active={tab === "activity"} icon={<History size={19} />} label="Activité" onClick={() => navigate("/activite")} /><ShopNavButton active={tab === "account"} icon={<Store size={19} />} label="Compte" onClick={() => navigate("/compte")} /></nav>}
@@ -450,85 +471,95 @@ function ShopRelationship({ relation, screen, targetEntryId, onNavigate, onDone 
 }
 
 function ShopActivity() {
-  const query = useQuery({ queryKey: ["shop-activity"], queryFn: api.shopActivity });
+  const [period, setPeriod] = useState<"today" | "7d" | "month" | "all">("today");
+  const query = useQuery({ queryKey: ["shop-activity"], queryFn: api.shopActivity, ...visibleLiveQuery });
+  const summary = useQuery({ queryKey: ["shop-summary", period], queryFn: () => api.shopSummary(period), ...visibleLiveQuery });
   const navigate = useNavigate();
-  return <main className="shop-root-page shop-activity-page"><div className="shop-page-heading"><p>Suivi quotidien</p><h1>Activité</h1><span>Les dernières écritures confirmées de tous vos clients.</span></div>{query.isLoading ? <Loading /> : query.error ? <ErrorState error={query.error} /> : <section className="shop-activity-list" aria-label="Opérations récentes"><div className="section-heading"><div><p>Journal global</p><h3>Opérations récentes</h3></div><span>{query.data?.items.length ?? 0}</span></div>{query.data?.items.map(({ entry, client }) => <button className="shop-activity-row" key={`${client.id}-${entry.id}`} onClick={() => navigate(`/clients/${client.id}`)}><span className={`entry-icon ${signedAmount(entry) > 0 ? "debt" : "credit"}`}><PackagePlus size={17} /></span><span><strong>{entry.title}</strong><small>{client.name} · {entry.recordedByRole === "client" ? entry.sourceChannel === "shop_qr" ? "Client via QR" : "Enregistré par le client" : "Enregistré par vous"} · {dateLabel(entry.recordedAt)}, {timeLabel(entry.recordedAt)}</small></span><b className={signedAmount(entry) > 0 ? "debt" : "credit"}>{signedAmount(entry) > 0 ? "+" : "−"}{money.format(Math.abs(signedAmount(entry)))}</b><ChevronRight size={17} /></button>)}</section>}</main>;
+  return <main className="shop-root-page shop-activity-page">
+    <div className="shop-page-heading"><p>Pilotage</p><h1>Activité</h1><span>Votre petite comptabilité et toutes les écritures confirmées.</span></div>
+    <div className="summary-period activity-period" role="group" aria-label="Période du résumé">{([['today', "Aujourd'hui"], ['7d', "7 jours"], ['month', "Mois"], ['all', "Tout"]] as const).map(([value, label]) => <button key={value} className={period === value ? "active" : ""} onClick={() => setPeriod(value)}>{label}</button>)}</div>
+    <section className="activity-summary" aria-label="Petite comptabilité">
+      <SummaryMetric label="À recevoir" value={summary.data ? formatMoney(Math.max(summary.data.balanceTotalXof, 0)) : "…"} />
+      <SummaryMetric label="Remboursé" value={summary.data ? formatMoney(summary.data.repaidXof) : "…"} tone="green" />
+      <SummaryMetric label="Crédit accordé" value={summary.data ? formatMoney(summary.data.creditGrantedXof) : "…"} />
+      <SummaryMetric label="Contesté" value={summary.data ? formatMoney(summary.data.balanceDisputedXof) : "…"} />
+    </section>
+    {query.isLoading ? <Loading /> : query.error ? <ErrorState error={query.error} /> : <section className="shop-activity-list" aria-label="Opérations récentes"><div className="section-heading"><div><p>Journal global</p><h3>Opérations récentes</h3></div><span>{query.data?.items.length ?? 0}</span></div>{query.data?.items.map(({ entry, client, trust }) => <button className="shop-activity-row" key={`${client.id}-${entry.id}`} onClick={() => navigate(`/clients/${client.id}`)}><span className={`entry-icon ${signedAmount(entry) > 0 ? "debt" : "credit"}`}>{entry.type === "repayment" ? <Banknote size={17} /> : <PackagePlus size={17} />}</span><span><strong>{entry.title}</strong><small>{client.name} · {entry.recordedByRole === "client" ? entry.sourceChannel === "shop_qr" ? "Client via QR" : "Enregistré par le client" : "Enregistré par vous"} · {dateLabel(entry.recordedAt)}, {timeLabel(entry.recordedAt)}</small><em className={`trust-pill ${trust?.trustStatus ?? "new"}`}>{trust?.trustScore === null || !trust ? "Nouveau" : `${trustLabel(trust.trustStatus)} · ${trust.trustScore}/100`}</em></span><b className={signedAmount(entry) > 0 ? "debt" : "credit"}>{signedAmount(entry) > 0 ? "+" : "−"}{money.format(Math.abs(signedAmount(entry)))}</b><ChevronRight size={17} /></button>)}</section>}
+  </main>;
 }
 
 function ShopAccount({ context, notify }: { context: ActorContext; notify: (message: string) => void }) {
   const queryClient = useQueryClient();
-  const qrQuery = useQuery({ queryKey: ["shop-qr"], queryFn: api.shopQr, retry: false });
-  const rotate = useMutation({ mutationFn: api.rotateShopQr, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["shop-qr"] }); notify("QR de la boutique renouvelé"); } });
-  const update = useMutation({ mutationFn: api.updateShopAccount });
+  const rotate = useMutation({ mutationFn: api.rotateShopQr, onSuccess: (next) => { queryClient.setQueryData(["shop-qr"], next); notify("QR de la boutique renouvelé"); } });
+  const update = useMutation({ mutationFn: api.updateShopAccount, onSuccess: async (next) => { queryClient.setQueriesData({ queryKey: ["me"] }, next); await queryClient.invalidateQueries({ queryKey: ["me"] }); } });
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(context.shop?.name ?? "");
-  const [qrImage, setQrImage] = useState<string | null>(null);
-  useEffect(() => {
-    if (!qrQuery.data) return;
-    let active = true;
-    void import("qrcode").then(({ default: QRCode }) => QRCode.toDataURL(
-      `${window.location.origin}${qrQuery.data.path}`,
-      { errorCorrectionLevel: "H", margin: 2, width: 220 },
-    )).then((image) => { if (active) setQrImage(image); });
-    return () => { active = false; };
-  }, [qrQuery.data]);
-  return <main className="shop-root-page shop-account-page"><div className="shop-page-heading"><p>Boutique</p><h1>Compte</h1><span>Votre identité et le QR qui permet à un client vérifié de vous retrouver.</span></div><section className="shop-account-identity"><span><Store size={24} /></span><div><strong>{context.shop?.name}</strong><p>{context.shop?.phoneE164 || "Téléphone non renseigné"}</p><small><BadgeCheck size={14} /> Numéro vérifié par Supabase Auth</small></div></section><section className="shop-qr-tool"><div><p>QR de la boutique</p><h2>Relier un client présent</h2><span>Le code est permanent jusqu'à renouvellement et ne contient aucune donnée financière.</span></div>{qrQuery.isLoading ? <Loading label="Préparation du QR…" /> : qrQuery.data ? <div className="shop-qr-preview" aria-label={`QR de ${context.shop?.name}`}><img src={qrImage ?? undefined} alt="QR de la boutique" /><strong>{context.shop?.name}</strong><small>Permanent · révocable</small><button className="text-action" onClick={() => rotate.mutate()} disabled={rotate.isPending}><RotateCcw size={15} /> Renouveler</button></div> : <button className="primary-action" onClick={() => rotate.mutate()} disabled={rotate.isPending}><QrCode size={18} /> Afficher le QR</button>}</section><section className="account-setting-list" aria-label="Paramètres du compte">{editing ? <form onSubmit={(event) => { event.preventDefault(); update.mutate(name, { onSuccess: () => { setEditing(false); notify("Informations mises à jour"); } }); }}><Field label="Nom de la boutique" value={name} onChange={setName} autoFocus /><button className="primary-action" type="submit" disabled={!name.trim() || update.isPending}>Enregistrer</button></form> : <button onClick={() => setEditing(true)}><span><strong>Informations de la boutique</strong><small>{context.shop?.name}</small></span><ChevronRight size={18} /></button>}<button onClick={async () => { await supabase?.auth.signOut(); }}><span><strong>Se déconnecter</strong><small>Fermer la session sur cet appareil</small></span><LogOut size={18} /></button></section></main>;
+  return <main className="shop-root-page shop-account-page"><div className="shop-page-heading"><p>Paramètres</p><h1>Compte</h1><span>Votre identité, la sécurité de l'espace et la gestion du QR permanent.</span></div><section className="shop-account-identity"><span><Store size={24} /></span><div><strong>{context.shop?.name}</strong><p>{context.shop?.phoneE164 || "Téléphone non renseigné"}</p><small><BadgeCheck size={14} /> Numéro vérifié par Supabase Auth</small></div></section><section className="account-setting-list" aria-label="Paramètres du compte">{editing ? <form onSubmit={(event) => { event.preventDefault(); update.mutate(name, { onSuccess: () => { setEditing(false); notify("Informations mises à jour"); } }); }}><Field label="Nom de la boutique" value={name} onChange={setName} autoFocus /><button className="primary-action" type="submit" disabled={!name.trim() || update.isPending}>Enregistrer</button></form> : <button onClick={() => setEditing(true)}><span><strong>Informations de la boutique</strong><small>{context.shop?.name}</small></span><ChevronRight size={18} /></button>}<button onClick={() => { if (window.confirm("L'ancien QR cessera immédiatement de fonctionner. Renouveler le QR ?")) rotate.mutate(); }} disabled={rotate.isPending}><span><strong>Renouveler le QR permanent</strong><small>Uniquement si l'ancien code doit être révoqué</small></span><RotateCcw size={18} /></button><button onClick={async () => { await supabase?.auth.signOut(); }}><span><strong>Se déconnecter</strong><small>Fermer la session sur cet appareil</small></span><LogOut size={18} /></button></section></main>;
 }
 
 function ClientApp({ context }: { context: ActorContext }) {
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const homeQuery = useQuery({ queryKey: ["client-home"], queryFn: api.clientHome });
-  const initialClientParams = new URLSearchParams(location.search);
-  const [tab, setTab] = useState<"home" | "ledger" | "credit" | "profile">(initialClientParams.get("tab") === "credit" ? "credit" : "home");
-  const [relationshipId, setRelationshipId] = useState<string | null>(initialClientParams.get("shopClientId"));
-  const [operationSource, setOperationSource] = useState<"app" | "shop_qr">(initialClientParams.get("source") === "shop_qr" ? "shop_qr" : "app");
-  const [mode, setMode] = useState<"debt" | "repayment">("debt");
+  const homeQuery = useQuery({ queryKey: ["client-home"], queryFn: api.clientHome, ...visibleLiveQuery });
+  const params = new URLSearchParams(location.search);
+  const pathParts = location.pathname.split("/").filter(Boolean);
+  const routeRelationshipId = pathParts[1] === "boutiques" ? pathParts[2] : null;
+  const relationshipId = routeRelationshipId || params.get("shopClientId");
+  const operationSource: "app" | "shop_qr" = params.get("source") === "shop_qr" ? "shop_qr" : "app";
+  const operationMode: "debt" | "repayment" = location.pathname === "/client/rembourser" ? "repayment" : "debt";
   const [amountsVisible, setAmountsVisible] = useState(() => localStorage.getItem("boutikier:amounts") !== "hidden");
-  const [disputeEntry, setDisputeEntry] = useState<{ relation: Relationship; entry: LedgerEntry } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const relationQuery = useQuery({ queryKey: ["client-relationship", relationshipId], queryFn: () => api.clientRelationship(relationshipId!), enabled: Boolean(relationshipId) });
-  useEffect(() => { const params = new URLSearchParams(location.search); const requested = params.get("shopClientId"); if (requested) { setRelationshipId(requested); setOperationSource(params.get("source") === "shop_qr" ? "shop_qr" : "app"); setTab("credit"); } }, [location.search]);
+  const relationQuery = useQuery({ queryKey: ["client-relationship", relationshipId], queryFn: () => api.clientRelationship(relationshipId!), enabled: Boolean(relationshipId), ...visibleLiveQuery });
+  const refreshKeys = useMemo(() => [["client-home"], ["client-relationship"]], []);
+  useRefreshOnResume(refreshKeys);
+  const online = useOnlineStatus();
   useEffect(() => { localStorage.setItem("boutikier:amounts", amountsVisible ? "visible" : "hidden"); }, [amountsVisible]);
   function notify(message: string) { setToast(message); window.setTimeout(() => setToast(null), 2600); }
   function invalidate() { void Promise.all([queryClient.invalidateQueries({ queryKey: ["client-home"] }), queryClient.invalidateQueries({ queryKey: ["client-relationship", relationshipId] })]); }
+  function backToHome() {
+    const historyIndex = (window.history.state as { idx?: number } | null)?.idx ?? 0;
+    if (historyIndex > 0) navigate(-1);
+    else navigate("/client", { replace: true });
+  }
   const home = homeQuery.data;
-  const activeRelation = relationQuery.data || home?.relationships.find((item) => item.shopClient.id === relationshipId) || home?.relationships[0];
+  const activeRelation = relationQuery.data || home?.relationships.find((item) => item.shopClient.id === relationshipId) || (home?.relationships.length === 1 ? home.relationships[0] : undefined);
   const totalBalance = home?.relationships.reduce((sum, item) => sum + item.balance.balanceTotalXof, 0) ?? 0;
-  const firstName = context.client?.displayName.split(" ")[0] || "vous";
-  const focusMode = tab === "credit" || Boolean(disputeEntry);
-  const openLedger = (id: string) => { setRelationshipId(id); setTab("ledger"); };
-  return <div className={`client-account-app ${focusMode ? "focus-mode" : ""}`}>
-    <header className="client-account-header"><div className="brand-lockup"><span className="brand-mark"><BrandLogo /></span><div><strong>Boutikier</strong><span>Espace client</span></div></div><div className="account-person"><span className="avatar">{initials(context.client?.displayName || "")}</span><div><strong>{context.client?.displayName}</strong><span><BadgeCheck size={13} /> Numéro vérifié</span></div></div></header>
-    <div className="client-account-layout">
-      <nav className="client-nav" aria-label="Navigation client"><ClientNavButton active={tab === "home"} icon={<Home size={18} />} label="Accueil" onClick={() => setTab("home")} /><ClientNavButton active={tab === "ledger"} icon={<BookOpen size={18} />} label="Mes relevés" onClick={() => setTab("ledger")} /><ClientNavButton active={tab === "credit"} icon={<Plus size={18} />} label="Enregistrer" onClick={() => { setMode("debt"); setTab("credit"); }} /><ClientNavButton active={tab === "profile"} icon={<BadgeCheck size={18} />} label="Mon compte" onClick={() => setTab("profile")} /></nav>
-      <main className="client-account-content">{homeQuery.isLoading ? <Loading /> : homeQuery.error ? <ErrorState error={homeQuery.error} /> : disputeEntry ? <DisputeForm relation={disputeEntry.relation} entry={disputeEntry.entry} onCancel={() => setDisputeEntry(null)} onDone={(message) => { setDisputeEntry(null); invalidate(); notify(message); }} /> : tab === "home" ? <ClientHome firstName={firstName} relationships={home?.relationships ?? []} totalBalance={totalBalance} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onScan={() => navigate("/client/scanner")} onOpenLedger={openLedger} onDebt={(id) => { setRelationshipId(id); setOperationSource("app"); setMode("debt"); setTab("credit"); }} onRepayment={(id) => { setRelationshipId(id); setOperationSource("app"); setMode("repayment"); setTab("credit"); }} /> : tab === "ledger" ? <ClientLedger relationships={home?.relationships ?? []} active={activeRelation} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onSelect={setRelationshipId} onDispute={(entry) => activeRelation && setDisputeEntry({ relation: activeRelation, entry })} /> : tab === "credit" ? activeRelation ? <OperationForm relation={activeRelation} mode={mode} clientMode sourceChannel={operationSource} onCancel={() => setTab("home")} onDone={(message) => { invalidate(); notify(message); if (operationSource === "shop_qr") { setOperationSource("app"); setTab("home"); navigate("/client", { replace: true }); } }} /> : <NoRelationship onScan={() => navigate("/client/scanner")} /> : <ClientProfile context={context} />}</main>
-    </div>
+  const relationships = home?.relationships ?? [];
+  const isOperation = location.pathname === "/client/acheter" || location.pathname === "/client/rembourser";
+  const isStatements = location.pathname === "/client/releves" || Boolean(routeRelationshipId);
+  const disputeEntryId = pathParts[3] === "contester" ? pathParts[4] : null;
+  const disputeEntry = disputeEntryId ? activeRelation?.entries.find((entry) => entry.id === disputeEntryId) : undefined;
+  const selectForOperation = (id: string) => navigate(`${location.pathname}?shopClientId=${encodeURIComponent(id)}${operationSource === "shop_qr" ? "&source=shop_qr" : ""}`, { replace: true });
+  return <div className="client-account-app">
+    {!online && <div className="offline-banner" role="status"><WifiOff size={15} /> Hors ligne · resynchronisation automatique au retour du réseau</div>}
+    <main className="client-account-content">{homeQuery.isLoading ? <Loading /> : homeQuery.error ? <ErrorState error={homeQuery.error} /> : location.pathname === "/client" ? <ClientHome relationships={relationships} totalBalance={totalBalance} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onSettings={() => navigate("/client/parametres")} onScan={() => navigate("/client/scanner")} onOpenLedger={(id) => navigate(`/client/boutiques/${id}`)} onViewAll={() => navigate("/client/releves")} onDebt={() => navigate(`/client/acheter${relationships.length === 1 ? `?shopClientId=${relationships[0].shopClient.id}` : ""}`)} onRepayment={() => navigate(`/client/rembourser${relationships.length === 1 ? `?shopClientId=${relationships[0].shopClient.id}` : ""}`)} /> : location.pathname === "/client/parametres" ? <ClientProfile context={context} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onBack={backToHome} /> : disputeEntry && activeRelation ? <DisputeForm relation={activeRelation} entry={disputeEntry} onCancel={backToHome} onDone={(message) => { invalidate(); notify(message); navigate(`/client/boutiques/${activeRelation.shopClient.id}`, { replace: true }); }} /> : isStatements ? <ClientLedger relationships={relationships} active={activeRelation || relationships[0]} amountsVisible={amountsVisible} onToggleAmounts={() => setAmountsVisible((value) => !value)} onBack={backToHome} onSelect={(id) => navigate(`/client/boutiques/${id}`)} onDispute={(entry) => activeRelation && navigate(`/client/boutiques/${activeRelation.shopClient.id}/contester/${entry.id}`)} /> : isOperation ? activeRelation ? <OperationForm relation={activeRelation} mode={operationMode} clientMode sourceChannel={operationSource} onCancel={backToHome} onDone={(message) => { invalidate(); notify(message); navigate("/client", { replace: operationSource === "shop_qr" }); }} /> : relationships.length > 1 ? <RelationshipPicker mode={operationMode} relationships={relationships} onBack={backToHome} onSelect={selectForOperation} /> : <NoRelationship onScan={() => navigate("/client/scanner")} onBack={backToHome} /> : <NavigateTo to="/client" />}</main>
     {toast && <div className="toast" role="status"><Check size={17} /> {toast}</div>}
   </div>;
 }
 
-function ClientNavButton({ active, icon, label, onClick }: { active: boolean; icon: ReactNode; label: string; onClick: () => void }) { return <button className={active ? "active" : ""} onClick={onClick}>{icon}<span>{label}</span></button>; }
-
-function ClientHome({ firstName, relationships, totalBalance, amountsVisible, onToggleAmounts, onScan, onOpenLedger, onDebt, onRepayment }: { firstName: string; relationships: Relationship[]; totalBalance: number; amountsVisible: boolean; onToggleAmounts: () => void; onScan: () => void; onOpenLedger: (id: string) => void; onDebt: (id: string) => void; onRepayment: (id: string) => void }) {
+function ClientHome({ relationships, totalBalance, amountsVisible, onToggleAmounts, onSettings, onScan, onOpenLedger, onViewAll, onDebt, onRepayment }: { relationships: Relationship[]; totalBalance: number; amountsVisible: boolean; onToggleAmounts: () => void; onSettings: () => void; onScan: () => void; onOpenLedger: (id: string) => void; onViewAll: () => void; onDebt: () => void; onRepayment: () => void }) {
   const recent = relationships.flatMap((relation) => relation.entries.map((entry) => ({ relation, entry }))).sort((left, right) => new Date(right.entry.recordedAt).getTime() - new Date(left.entry.recordedAt).getTime()).slice(0, 3);
-  return <div className="client-dashboard"><div className="client-page-title"><p>Bonjour {firstName}</p><h1>Votre situation</h1></div><button className="client-home-scan" onClick={onScan}><span><QrCode size={21} /></span><span><strong>Scanner une boutique</strong><small>Identifier le QR affiché par le boutiquier</small></span><ChevronRight size={19} /></button><section className="client-summary single"><div className="client-debt-total"><span>Dette totale</span><strong>{amountsVisible ? formatMoney(totalBalance) : "******"}</strong><small>{relationships.length} boutique{relationships.length > 1 ? "s" : ""}</small><button className="balance-visibility" onClick={onToggleAmounts} aria-label={amountsVisible ? "Masquer les montants" : "Afficher les montants"}>{amountsVisible ? <EyeOff size={19} /> : <Eye size={19} />}</button></div></section><section className="client-relationships"><div className="section-heading"><div><p>Mes boutiques</p><h3>Relations actives</h3></div><span>{relationships.length}</span></div>{relationships.map((relation) => <button className="relationship-card" key={relation.shopClient.id} onClick={() => onOpenLedger(relation.shopClient.id)}><span className="avatar shop-avatar">{initials(relation.shop.name)}</span><span><strong>{relation.shop.name}</strong><p>Ouvrir le relevé</p></span><b>{amountsVisible ? formatMoney(relation.balance.balanceTotalXof) : "******"}</b><ChevronRight size={17} /></button>)}</section>{relationships.length > 0 ? <div className="client-home-actions"><button className="client-home-credit" onClick={() => onDebt(relationships[0].shopClient.id)}><span className="client-home-credit-icon"><PackagePlus size={20} /></span><span><strong>Acheter à crédit</strong><small>Saisir l'article et le prix</small></span><ChevronRight size={19} /></button><button className="client-home-credit repayment" onClick={() => onRepayment(relationships[0].shopClient.id)}><span className="client-home-credit-icon"><Banknote size={20} /></span><span><strong>Noter un remboursement</strong><small>Paiement remis à la boutique</small></span><ChevronRight size={19} /></button></div> : <NoRelationship />}{recent.length > 0 && <section className="recent-activity"><div className="section-heading"><div><p>Activité récente</p><h3>Dernières opérations</h3></div><button onClick={() => onOpenLedger(recent[0].relation.shopClient.id)}>Voir tout</button></div>{recent.map(({ relation, entry }) => { const amount = signedAmount(entry); return <button className="recent-activity-row" key={entry.id} onClick={() => onOpenLedger(relation.shopClient.id)}><span className={`entry-icon ${amount > 0 ? "debt" : "credit"}`}>{entry.type === "repayment" ? <Banknote size={16} /> : <PackagePlus size={16} />}</span><span><strong>{entry.title}</strong><small>{relation.shop.name} · {entry.recordedByRole === "client" && entry.sourceChannel === "shop_qr" ? "via QR boutique · " : ""}{dateLabel(entry.recordedAt)}</small></span><b className={amount > 0 ? "debt" : "credit"}>{amountsVisible ? `${amount > 0 ? "+" : "−"}${money.format(Math.abs(amount))}` : "******"}</b></button>; })}</section>}</div>;
+  return <div className="client-dashboard client-home-page"><h1 className="sr-only">Votre situation</h1><div className="client-home-top"><button onClick={onSettings} aria-label="Paramètres"><Settings size={22} /></button></div><section className="client-summary single"><div className="client-debt-total"><span>Dette totale</span><strong>{amountsVisible ? formatMoney(totalBalance) : "******"}</strong><small>{relationships.length} boutique{relationships.length > 1 ? "s" : ""} connectée{relationships.length > 1 ? "s" : ""}</small><button className="balance-visibility" onClick={onToggleAmounts} aria-label={amountsVisible ? "Masquer les montants" : "Afficher les montants"}>{amountsVisible ? <EyeOff size={19} /> : <Eye size={19} />}</button></div></section><div className="client-quick-actions" aria-label="Actions principales"><button onClick={onDebt}><span><PackagePlus size={21} /></span><strong>Acheter</strong></button><button className="scan" onClick={onScan}><span><QrCode size={23} /></span><strong>Scanner</strong></button><button onClick={onRepayment}><span><Banknote size={21} /></span><strong>Rembourser</strong></button></div><section className={`client-relationships ${relationships.length === 0 ? "is-empty" : ""}`}><div className="section-heading"><div><p>Mes boutiques</p><h3>Relations actives</h3></div><span>{relationships.length}</span></div>{relationships.map((relation) => <button className="relationship-card" key={relation.shopClient.id} onClick={() => onOpenLedger(relation.shopClient.id)}><span className="avatar shop-avatar">{initials(relation.shop.name)}</span><span><strong>{relation.shop.name}</strong><p>Ouvrir le relevé</p></span><b>{amountsVisible ? formatMoney(relation.balance.balanceTotalXof) : "******"}</b><ChevronRight size={17} /></button>)}{relationships.length === 0 && <NoRelationship />}</section>{recent.length > 0 && <section className="recent-activity"><div className="section-heading"><div><p>Activité récente</p><h3>Dernières opérations</h3></div><button onClick={onViewAll}>Voir tout</button></div>{recent.map(({ relation, entry }) => { const amount = signedAmount(entry); return <button className="recent-activity-row" key={entry.id} onClick={() => onOpenLedger(relation.shopClient.id)}><span className={`entry-icon ${amount > 0 ? "debt" : "credit"}`}>{entry.type === "repayment" ? <Banknote size={16} /> : <PackagePlus size={16} />}</span><span><strong>{entry.title}</strong><small>{relation.shop.name} · {entry.recordedByRole === "client" && entry.sourceChannel === "shop_qr" ? "via QR boutique · " : ""}{dateLabel(entry.recordedAt)}</small></span><b className={amount > 0 ? "debt" : "credit"}>{amountsVisible ? `${amount > 0 ? "+" : "−"}${money.format(Math.abs(amount))}` : "******"}</b></button>; })}</section>}</div>;
 }
 
-function ClientLedger({ relationships, active, amountsVisible, onToggleAmounts, onSelect, onDispute }: { relationships: Relationship[]; active?: Relationship; amountsVisible: boolean; onToggleAmounts: () => void; onSelect: (id: string) => void; onDispute: (entry: LedgerEntry) => void }) {
-  return <div className="client-dashboard"><div className="client-page-title"><p>Historique</p><h1>Mes relevés</h1></div>{relationships.length > 1 && <label className="relationship-switcher"><span>Boutique consultée</span><select value={active?.shopClient.id ?? ""} onChange={(event) => onSelect(event.target.value)}>{relationships.map((relation) => <option key={relation.shopClient.id} value={relation.shopClient.id}>{relation.shop.name}</option>)}</select></label>}{active ? <Ledger relation={active} audience="client" amountsVisible={amountsVisible} onToggleAmounts={onToggleAmounts} onDispute={onDispute} /> : <NoRelationship />}</div>;
+function RelationshipPicker({ mode, relationships, onBack, onSelect }: { mode: "debt" | "repayment"; relationships: Relationship[]; onBack: () => void; onSelect: (id: string) => void }) {
+  return <div className="client-dashboard focused-client-page"><ViewHeader title={mode === "debt" ? "Acheter à crédit" : "Noter un remboursement"} onBack={onBack} /><p className="route-intro">Choisissez la boutique concernée.</p><div className="relationship-picker">{relationships.map((relation) => <button key={relation.shopClient.id} onClick={() => onSelect(relation.shopClient.id)}><span className="avatar shop-avatar">{initials(relation.shop.name)}</span><span><strong>{relation.shop.name}</strong><small>{formatMoney(relation.balance.balanceTotalXof)}</small></span><ChevronRight size={18} /></button>)}</div></div>;
 }
 
-function ClientProfile({ context }: { context: ActorContext }) { return <div className="profile-page"><div className="client-page-title"><p>Identité</p><h1>Mon compte</h1></div><section className="profile-card"><span className="avatar large">{initials(context.client?.displayName || "")}</span><div><h2>{context.client?.displayName}</h2><p>{context.client?.phoneE164}</p><span><BadgeCheck size={15} /> Numéro vérifié par OTP</span></div></section><section className="security-card"><ShieldCheck size={22} /><div><strong>Compte protégé</strong><p>Les boutiques ne voient que les relations commerciales qui les concernent.</p></div></section><button className="secondary-action profile-signout" onClick={() => { void supabase?.auth.signOut(); }}><LogOut size={17} /> Se déconnecter</button></div>; }
+function ClientLedger({ relationships, active, amountsVisible, onToggleAmounts, onBack, onSelect, onDispute }: { relationships: Relationship[]; active?: Relationship; amountsVisible: boolean; onToggleAmounts: () => void; onBack: () => void; onSelect: (id: string) => void; onDispute: (entry: LedgerEntry) => void }) {
+  return <div className="client-dashboard focused-client-page"><ViewHeader title="Mes relevés" onBack={onBack} />{relationships.length > 1 && <label className="relationship-switcher"><span>Boutique consultée</span><select value={active?.shopClient.id ?? ""} onChange={(event) => onSelect(event.target.value)}>{relationships.map((relation) => <option key={relation.shopClient.id} value={relation.shopClient.id}>{relation.shop.name}</option>)}</select></label>}{active ? <Ledger relation={active} audience="client" amountsVisible={amountsVisible} onToggleAmounts={onToggleAmounts} onDispute={onDispute} /> : <NoRelationship />}</div>;
+}
 
-function NoRelationship({ onScan }: { onScan?: () => void } = {}) { return <div className="empty-journal"><QrCode size={26} /><strong>Aucune boutique connectée</strong><p>Scannez le QR affiché par votre boutiquier pour commencer.</p>{onScan && <button className="primary-action" onClick={onScan}><QrCode size={17} /> Scanner une boutique</button>}</div>; }
+function ClientProfile({ context, amountsVisible, onToggleAmounts, onBack }: { context: ActorContext; amountsVisible: boolean; onToggleAmounts: () => void; onBack: () => void }) { return <div className="profile-page focused-client-page"><ViewHeader title="Paramètres" onBack={onBack} /><section className="profile-card"><span className="avatar large">{initials(context.client?.displayName || "")}</span><div><h2>{context.client?.displayName}</h2><p>{context.client?.phoneE164}</p><span><BadgeCheck size={15} /> Numéro vérifié par OTP</span></div></section><section className="account-setting-list client-settings-list"><button onClick={onToggleAmounts}><span><strong>Montants sur l'écran</strong><small>{amountsVisible ? "Visibles sur cet appareil" : "Masqués sur cet appareil"}</small></span>{amountsVisible ? <EyeOff size={18} /> : <Eye size={18} />}</button></section><section className="security-card"><ShieldCheck size={22} /><div><strong>Compte protégé</strong><p>Les boutiques ne voient que les relations commerciales qui les concernent.</p></div></section><button className="secondary-action profile-signout" onClick={() => { void supabase?.auth.signOut(); }}><LogOut size={17} /> Se déconnecter</button></div>; }
+
+function NoRelationship({ onScan, onBack }: { onScan?: () => void; onBack?: () => void } = {}) { return <div className="empty-journal client-empty-state">{onBack && <ViewHeader title="Boutique requise" onBack={onBack} />}<QrCode size={26} /><strong>Aucune boutique connectée</strong><p>Scannez le QR affiché par votre boutiquier pour commencer.</p>{onScan && <button className="primary-action" onClick={onScan}><QrCode size={17} /> Scanner une boutique</button>}</div>; }
 
 function Ledger({ relation, audience, amountsVisible = true, onToggleAmounts, onDebt, onRepayment, onShare, onEntryAction, onDispute }: { relation: Relationship; audience: "shop" | "client"; amountsVisible?: boolean; onToggleAmounts?: () => void; onDebt?: () => void; onRepayment?: () => void; onShare?: () => void; onEntryAction?: (entry: LedgerEntry) => void; onDispute?: (entry: LedgerEntry) => void }) {
   const balance = relation.balance;
   const disputedPct = Math.min(100, Math.max(0, Math.abs(balance.balanceDisputedXof) / Math.max(Math.abs(balance.balanceTotalXof), 1) * 100));
   const displayAmount = (value: number) => amountsVisible ? money.format(value) : "******";
-  return <div className="ledger-view"><section className={`identity-block ${audience === "client" ? "client-identity-block" : ""}`}><span className="avatar large">{audience === "shop" ? initials(relation.client.name) : initials(relation.shop.name)}</span><div className="identity-copy"><h2>{audience === "shop" ? relation.client.name : relation.shop.name}</h2><p>{audience === "shop" ? relation.client.phoneE164 || "Aucun numéro renseigné" : "Relation active"}</p>{audience === "shop" && <span>{relation.client.name} doit à {relation.shop.name}</span>}</div>{audience === "client" && <span className="verification verified"><BadgeCheck size={15} /> Vérifié</span>}</section><section className="balance-card private-balance"><div className="balance-heading"><span>{audience === "shop" ? "Solde enregistré" : `Solde chez ${relation.shop.name}`}</span><span>Mis à jour maintenant</span></div><div className="balance-total">{displayAmount(balance.balanceTotalXof)}{amountsVisible && <small>FCFA</small>}</div>{audience === "client" && <button className="balance-visibility ledger-visibility" onClick={onToggleAmounts} aria-label={amountsVisible ? "Masquer les montants" : "Afficher les montants"}>{amountsVisible ? <EyeOff size={19} /> : <Eye size={19} />}</button>}<div className="balance-track"><span className="clear" style={{ width: `${100 - disputedPct}%` }} /><span className="disputed" style={{ width: `${disputedPct}%` }} /></div><div className="balance-breakdown"><span><i className="dot clear" />Non contesté <strong>{displayAmount(balance.balanceClearXof)}</strong></span>{balance.balanceDisputedXof !== 0 && <span><i className="dot disputed" />Montant contesté <strong>{displayAmount(balance.balanceDisputedXof)}</strong></span>}</div></section>{audience === "shop" && <div className="ledger-actions"><button className="primary-action" onClick={onDebt}><PackagePlus size={18} /> Ajouter une dette</button><button className="secondary-action" onClick={onRepayment}><Banknote size={18} /> Noter un remboursement</button><button className="text-action" onClick={onShare}><Send size={17} /> Partager le relevé</button></div>}{audience === "client" && relation.trust && <div className="trust-card"><ShieldCheck size={19} /><div><strong>{relation.trust.trustScore === null ? "Nouveau" : `${relation.trust.trustScore}/100`}</strong><span>{relation.trust.trustScore === null ? "Historique insuffisant" : relation.trust.trustStatus}</span></div><small>{relation.trust.settledDebtCount} dette{relation.trust.settledDebtCount > 1 ? "s" : ""} réglée{relation.trust.settledDebtCount > 1 ? "s" : ""}</small></div>}<section className="journal-section"><div className="section-heading"><div><p>Historique immuable</p><h3>Journal</h3></div><span>{relation.entries.length} écriture{relation.entries.length > 1 ? "s" : ""}</span></div>{relation.entries.length === 0 ? <div className="empty-journal"><ReceiptText size={26} /><strong>Aucune écriture</strong><p>Les dettes et remboursements confirmés apparaîtront ici.</p></div> : <ol className="journal-list">{relation.entries.map((entry) => <EntryRow key={entry.id} entry={entry} audience={audience} amountsVisible={amountsVisible} onAction={() => audience === "shop" ? onEntryAction?.(entry) : onDispute?.(entry)} />)}</ol>}</section></div>;
+  return <div className="ledger-view"><section className={`identity-block ${audience === "client" ? "client-identity-block" : ""}`}><span className="avatar large">{audience === "shop" ? initials(relation.client.name) : initials(relation.shop.name)}</span><div className="identity-copy"><h2>{audience === "shop" ? relation.client.name : relation.shop.name}</h2><p>{audience === "shop" ? relation.client.phoneE164 || "Aucun numéro renseigné" : "Relation active"}</p>{audience === "shop" && <span>{relation.client.name} doit à {relation.shop.name}</span>}</div>{audience === "client" && <span className="verification verified"><BadgeCheck size={15} /> Vérifié</span>}</section><section className="balance-card private-balance"><div className="balance-heading"><span>{audience === "shop" ? "Solde enregistré" : `Solde chez ${relation.shop.name}`}</span><span>Mis à jour maintenant</span></div><div className="balance-total">{displayAmount(balance.balanceTotalXof)}{amountsVisible && <small>FCFA</small>}</div>{audience === "client" && <button className="balance-visibility ledger-visibility" onClick={onToggleAmounts} aria-label={amountsVisible ? "Masquer les montants" : "Afficher les montants"}>{amountsVisible ? <EyeOff size={19} /> : <Eye size={19} />}</button>}<div className="balance-track"><span className="clear" style={{ width: `${100 - disputedPct}%` }} /><span className="disputed" style={{ width: `${disputedPct}%` }} /></div><div className="balance-breakdown"><span><i className="dot clear" />Non contesté <strong>{displayAmount(balance.balanceClearXof)}</strong></span>{balance.balanceDisputedXof !== 0 && <span><i className="dot disputed" />Montant contesté <strong>{displayAmount(balance.balanceDisputedXof)}</strong></span>}</div></section>{audience === "shop" && <div className="ledger-actions"><button className="primary-action" onClick={onDebt}><PackagePlus size={18} /> Ajouter une dette</button><button className="secondary-action" onClick={onRepayment}><Banknote size={18} /> Noter un remboursement</button><button className="text-action" onClick={onShare}><Send size={17} /> Partager le relevé</button></div>}{relation.trust && <div className="trust-card"><ShieldCheck size={19} /><div><strong>{relation.trust.trustScore === null ? "Nouveau" : `${relation.trust.trustScore}/100`}</strong><span>{relation.trust.trustScore === null ? "Historique insuffisant" : trustLabel(relation.trust.trustStatus)}</span></div><small>{relation.trust.settledDebtCount} dette{relation.trust.settledDebtCount > 1 ? "s" : ""} réglée{relation.trust.settledDebtCount > 1 ? "s" : ""}</small></div>}<section className="journal-section"><div className="section-heading"><div><p>Historique immuable</p><h3>Journal</h3></div><span>{relation.entries.length} écriture{relation.entries.length > 1 ? "s" : ""}</span></div>{relation.entries.length === 0 ? <div className="empty-journal"><ReceiptText size={26} /><strong>Aucune écriture</strong><p>Les dettes et remboursements confirmés apparaîtront ici.</p></div> : <ol className="journal-list">{relation.entries.map((entry) => <EntryRow key={entry.id} entry={entry} audience={audience} amountsVisible={amountsVisible} onAction={() => audience === "shop" ? onEntryAction?.(entry) : onDispute?.(entry)} />)}</ol>}</section></div>;
 }
 
 function EntryRow({ entry, audience, amountsVisible = true, onAction }: { entry: LedgerEntry; audience: "shop" | "client"; amountsVisible?: boolean; onAction: () => void }) {
@@ -625,9 +656,10 @@ function QrLanding({ session }: { session: AuthSession | null }) {
   const location = useLocation();
   const code = decodeURIComponent(location.pathname.slice("/q/s/".length));
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const resolve = useQuery({ queryKey: ["resolve-qr", code], queryFn: () => api.resolveShopQr(code), retry: false });
   const context = useQuery({ queryKey: ["me", session?.user.id ?? null], queryFn: api.me, enabled: Boolean(session) });
-  const connect = useMutation({ mutationFn: () => api.connectShop(code), onSuccess: (result) => navigate(`/client?shopClientId=${result.shopClientId}&tab=credit&source=shop_qr`, { replace: true }) });
+  const connect = useMutation({ mutationFn: () => api.connectShop(code), onSuccess: async (result) => { await queryClient.invalidateQueries({ queryKey: ["client-home"] }); navigate(`/client/acheter?shopClientId=${result.shopClientId}&source=shop_qr`, { replace: true }); } });
   if (resolve.isLoading) return <Loading label="Vérification de la boutique…" />;
   if (resolve.error || !resolve.data) return <div className="statement-unavailable"><QrCode size={30} /><h1>QR indisponible</h1><p>Ce code est invalide ou a été révoqué par la boutique.</p></div>;
   if (!session) return <div className="qr-confirm-page"><QrCode size={35} /><p className="panel-heading-kicker">Boutique trouvée</p><h1>{resolve.data.shopName}</h1><p>Aucune application n'est nécessaire. Vérifiez votre téléphone pour créer ou retrouver votre compte client léger et enregistrer votre achat.</p><Link className="primary-action" to={`/connexion?returnTo=${encodeURIComponent(location.pathname)}`}>Continuer avec mon numéro</Link></div>;
@@ -642,6 +674,7 @@ function ScannerPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [manualCode, setManualCode] = useState("");
   useEffect(() => {
     let active = true;
     void import("@zxing/browser").then(({ BrowserQRCodeReader }) => {
@@ -657,7 +690,13 @@ function ScannerPage() {
     }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "La caméra n'est pas disponible."));
     return () => { active = false; controlsRef.current?.stop(); };
   }, [navigate]);
-  return <div className="scanner-page"><div className="scanner-header"><button className="icon-command" onClick={() => navigate("/client")} aria-label="Retour"><ArrowLeft size={20} /></button><div><p>Connexion</p><h1>Scanner une boutique</h1></div></div><div className="scanner-frame"><video ref={videoRef} autoPlay muted playsInline /><span className="scanner-corner" /></div>{error && <div className="inline-error"><CircleAlert size={17} />{error}</div>}<p>Placez le QR de la boutique dans le cadre. La caméra n'est active que sur cet écran.</p><button className="secondary-action" onClick={() => navigate("/client")}>Saisir un code manuellement</button></div>;
+  function openManual(event: FormEvent) {
+    event.preventDefault();
+    const match = manualCode.trim().match(/\/q\/s\/([^/?#]+)/) || manualCode.trim().match(/^([^/?#]+)$/);
+    if (!match?.[1]) { setError("Collez un lien ou un code QR Boutikier valide."); return; }
+    navigate(`/q/s/${match[1]}`);
+  }
+  return <div className="scanner-page"><div className="scanner-header"><button className="icon-command" onClick={() => navigate("/client")} aria-label="Retour"><ArrowLeft size={22} /></button><h1>Scanner une boutique</h1><span /></div><div className="scanner-frame"><video ref={videoRef} autoPlay muted playsInline /><span className="scanner-corner" /></div>{error && <div className="inline-error"><CircleAlert size={17} />{error}</div>}<p>Placez le QR de la boutique dans le cadre. La caméra n'est active que sur cet écran.</p><form className="manual-qr-form" onSubmit={openManual}><label className="field"><span>Lien ou code de secours</span><div className="input-wrap"><input value={manualCode} onChange={(event) => setManualCode(event.target.value)} placeholder="Coller le lien du QR" autoCapitalize="off" autoCorrect="off" /></div></label><button className="secondary-action" type="submit" disabled={!manualCode.trim()}>Ouvrir la boutique</button></form></div>;
 }
 
 function ClientScannerRoute() {

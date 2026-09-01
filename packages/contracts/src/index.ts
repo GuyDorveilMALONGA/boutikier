@@ -173,6 +173,16 @@ export const shopClientSummarySchema = z.object({
 });
 export type ShopClientSummary = z.infer<typeof shopClientSummarySchema>;
 
+export const relationshipTrustSchema = z.object({
+  trustScore: z.number().int().min(0).max(100).nullable(),
+  trustStatus: z.enum(["new", "reliable", "regular", "watch"]),
+  eligibleDebtCount: z.number().int().nonnegative(),
+  settledDebtCount: z.number().int().nonnegative(),
+  onTimeSettledCount: z.number().int().nonnegative(),
+  averageDaysToSettle: z.number().nullable(),
+});
+export type RelationshipTrust = z.infer<typeof relationshipTrustSchema>;
+
 export const paginatedShopClientsSchema = z.object({
   items: z.array(shopClientSummarySchema),
   nextCursor: z.string().nullable(),
@@ -188,20 +198,14 @@ export const relationshipSchema = z.object({
   }),
   balance: balanceSchema,
   entries: z.array(ledgerEntrySchema),
-  trust: z.object({
-    trustScore: z.number().int().min(0).max(100).nullable(),
-    trustStatus: z.enum(["new", "reliable", "regular", "watch"]),
-    eligibleDebtCount: z.number().int().nonnegative(),
-    settledDebtCount: z.number().int().nonnegative(),
-    onTimeSettledCount: z.number().int().nonnegative(),
-    averageDaysToSettle: z.number().nullable(),
-  }).nullable(),
+  trust: relationshipTrustSchema.nullable(),
 });
 export type Relationship = z.infer<typeof relationshipSchema>;
 
 export const shopActivityItemSchema = z.object({
   entry: ledgerEntrySchema,
   client: shopClientSummarySchema,
+  trust: relationshipTrustSchema.nullable(),
 });
 export const shopActivitySchema = z.object({
   items: z.array(shopActivityItemSchema),

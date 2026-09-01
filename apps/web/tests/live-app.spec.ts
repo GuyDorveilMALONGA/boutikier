@@ -8,6 +8,7 @@ const CLIENT_PHONE = "+221770000002";
 const DEMO_SHOP_PHONE = "+221703549365";
 const DEMO_CLIENT_PHONE = "+221777629953";
 const QR_NEW_CLIENT_PHONE = "+221770000003";
+const FRESH_SHOP_PHONE = "+221770000004";
 const OTP = "123456";
 
 let shopClientId = "";
@@ -164,16 +165,34 @@ test.beforeAll(async () => {
 
 });
 
+test("a newly onboarded shop receives its named permanent QR without reloading", async ({ page }) => {
+  test.setTimeout(60_000);
+  await new Promise((resolve) => setTimeout(resolve, 5_100));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Boutiquier" }).click();
+  await page.getByLabel("Nom de la boutique").fill("Boutique Fraîche");
+  await page.getByLabel("Numéro de téléphone").fill(FRESH_SHOP_PHONE);
+  await page.getByRole("button", { name: "Recevoir plutôt le code par SMS" }).click();
+  await page.getByLabel("Code à 6 chiffres").fill(OTP);
+  await page.getByRole("button", { name: "Vérifier et continuer" }).click();
+
+  await expect(page.getByRole("heading", { name: "Boutique Fraîche" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("img", { name: "QR permanent de Boutique Fraîche" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: /Afficher le QR/i })).toHaveCount(0);
+});
+
 test("the four-digit local demo PIN opens real client and shop accounts", async ({ page }) => {
   await new Promise((resolve) => setTimeout(resolve, 5_100));
   await demoLoginThroughUi(page, DEMO_CLIENT_PHONE);
   await expect(page.getByRole("heading", { name: "Votre situation" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Boutique Démo/ })).toBeVisible();
-  await page.getByRole("button", { name: "Mon compte" }).click();
+  await expect(page.getByRole("navigation", { name: "Navigation client" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Paramètres" }).click();
   await page.getByRole("button", { name: "Se déconnecter" }).click();
 
   await demoLoginThroughUi(page, DEMO_SHOP_PHONE);
-  await expect(page.getByRole("heading", { name: "Clients" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Clients qui doivent" })).toBeVisible();
+  await expect(page.getByRole("img", { name: /QR permanent de Boutique Démo/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Client Démo/ })).toBeVisible();
 });
 
@@ -183,8 +202,8 @@ test("the shop UI reads live summary and relationship data", async ({ page }) =>
   await page.setViewportSize({ width: 1280, height: 800 });
   await loginThroughUi(page, SHOP_PHONE);
 
-  await expect(page.getByRole("heading", { name: "Clients" })).toBeVisible();
-  await expect(page.getByLabel("Résumé de la boutique")).toContainText("À recevoir");
+  await expect(page.getByRole("heading", { name: "Clients qui doivent" })).toBeVisible();
+  await expect(page.getByLabel("Montant global à recevoir")).toContainText("À recevoir");
   await expect(page.getByRole("button", { name: /Cliente Test/i })).toBeVisible();
   await page.getByRole("button", { name: /Cliente Test/i }).click();
   await expect(page.getByText("Solde enregistré")).toBeVisible();
@@ -198,6 +217,12 @@ test("the shop UI reads live summary and relationship data", async ({ page }) =>
 test("a visitor without the app returns from OTP to the scanned shop and records through QR", async ({ page, browser }) => {
   test.setTimeout(120_000);
   const title = `Achat QR E2E ${Date.now()}`;
+  const shopContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const shopPage = await shopContext.newPage();
+  await new Promise((resolve) => setTimeout(resolve, 5_100));
+  await loginThroughUi(shopPage, SHOP_PHONE);
+  await shopPage.getByRole("button", { name: "Activité" }).click();
+  await expect(shopPage.getByRole("heading", { name: "Activité" })).toBeVisible();
 
   await page.goto(`/q/s/${shopQrCode}`);
   await expect(page.getByRole("heading", { name: shopName })).toBeVisible({ timeout: 15_000 });
@@ -234,13 +259,7 @@ test("a visitor without the app returns from OTP to the scanned shop and records
   await page.getByRole("button", { name: "Confirmer l'achat" }).click();
   await expect(page.getByRole("heading", { name: "Votre situation" })).toBeVisible();
   await expect(page.getByText(title, { exact: true })).toBeVisible();
-
-  await new Promise((resolve) => setTimeout(resolve, 5_100));
-  const shopContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  const shopPage = await shopContext.newPage();
-  await loginThroughUi(shopPage, SHOP_PHONE);
-  await shopPage.getByRole("button", { name: "Activité" }).click();
-  await expect(shopPage.getByText(title, { exact: true })).toBeVisible();
+  await expect(shopPage.getByText(title, { exact: true })).toBeVisible({ timeout: 8_000 });
   await expect(shopPage.getByText(/Client via QR/).first()).toBeVisible();
   await shopContext.close();
 });
@@ -249,7 +268,7 @@ test("an existing client session opens the same QR without another OTP", async (
   test.setTimeout(60_000);
   await new Promise((resolve) => setTimeout(resolve, 5_100));
   await demoLoginThroughUi(page, DEMO_CLIENT_PHONE);
-  await expect(page.getByRole("button", { name: /Scanner une boutique/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Scanner" })).toBeVisible();
   await page.goto(`/q/s/${demoQrCode}`);
   await expect(page.getByText("Confirmer la boutique")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("link", { name: "Continuer avec mon numéro" })).toHaveCount(0);
@@ -265,7 +284,7 @@ test("the client records a new debt into the same live journal", async ({ page }
   await expect(page.getByRole("heading", { name: "Votre situation" })).toBeVisible();
   await page.getByRole("button", { name: "Masquer les montants" }).click();
   await expect(page.getByText("******", { exact: true }).first()).toBeVisible();
-  await page.getByRole("button", { name: "Enregistrer" }).click();
+  await page.getByRole("button", { name: "Acheter" }).click();
   await expect(page.getByRole("heading", { name: "Nouvelle opération" })).toBeVisible();
   await page.getByRole("tab", { name: "Remboursement" }).click();
   await expect(page.getByLabel("Montant remboursé")).toBeVisible();
@@ -277,16 +296,23 @@ test("the client records a new debt into the same live journal", async ({ page }
   await page.getByRole("button", { name: "Voir le récapitulatif" }).click();
   await expect(page.getByText("Enregistré par vous dans Boutikier")).toBeVisible();
   await page.getByRole("button", { name: "Confirmer l'achat" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Achat ajouté au journal" })).toBeVisible();
-  await expect(page.getByLabel("Nom de l'article ou service")).toHaveValue("");
-  await page.getByRole("button", { name: "Retour" }).click();
+  await expect(page.getByRole("heading", { name: "Votre situation" })).toBeVisible();
   await expect(page.getByText("Activité récente")).toBeVisible();
   await expect(page.getByText(title, { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Mes relevés" }).click();
+  await page.getByRole("button", { name: "Voir tout" }).click();
+  await expect(page).toHaveURL(/\/client\/releves$/);
   await expect(page.getByLabel("Boutique consultée")).toHaveCount(0);
   await expect(page.getByText(title, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Afficher les montants" }).click();
   await expect(page.getByRole("button", { name: "Masquer les montants" })).toBeVisible();
+  await page.getByRole("button", { name: "Retour" }).click();
+  await expect(page).toHaveURL(/\/client$/);
+  await page.getByRole("button", { name: "Scanner" }).click();
+  await expect(page).toHaveURL(/\/client\/scanner$/);
+  await expect(page.getByRole("heading", { name: "Scanner une boutique" })).toBeVisible();
+  await expect(page.getByLabel("Lien ou code de secours")).toBeVisible();
+  await page.getByRole("button", { name: "Retour" }).click();
+  await expect(page).toHaveURL(/\/client$/);
 });
 
 test("a real shared statement remains strictly read-only", async ({ page }) => {

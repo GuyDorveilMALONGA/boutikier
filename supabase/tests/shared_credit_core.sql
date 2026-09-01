@@ -1,6 +1,6 @@
 begin;
 
-select plan(23);
+select plan(29);
 
 select has_table('public', 'client_profiles', 'client profiles table exists');
 select has_table('public', 'shop_public_codes', 'shop public code table exists');
@@ -27,6 +27,12 @@ select has_function(
   'connect_to_shop',
   array['text'],
   'shop QR connection command exists'
+);
+select has_function(
+  'public',
+  'complete_shop_onboarding_with_code',
+  array['text', 'uuid', 'text', 'text'],
+  'shop onboarding with permanent QR exists'
 );
 
 insert into auth.users (
@@ -74,6 +80,34 @@ select set_config(
   true
 );
 set local role authenticated;
+
+select lives_ok(
+  $$ select public.complete_shop_onboarding_with_code(
+    'Boutique Test',
+    '00000000-0000-0000-0000-000000000601',
+    repeat('b', 64),
+    'ONBOARD1'
+  ) $$,
+  'shop onboarding guarantees its first active QR'
+);
+
+select lives_ok(
+  $$ select public.complete_shop_onboarding_with_code(
+    'Boutique Test',
+    '00000000-0000-0000-0000-000000000602',
+    repeat('c', 64),
+    'ONBOARD2'
+  ) $$,
+  'repeating shop onboarding is idempotent for the active QR'
+);
+
+select is(
+  (select count(*)::integer from public.shop_public_codes
+   where shop_id = '00000000-0000-0000-0000-000000000201'
+     and revoked_at is null),
+  1,
+  'repeated onboarding keeps exactly one active QR'
+);
 
 select lives_ok(
   $$ select public.record_operation(
@@ -216,6 +250,15 @@ select throws_ok(
   'unrelated authenticated user cannot write the relationship'
 );
 
+select throws_ok(
+  $$ select public.get_shop_client(
+    '00000000-0000-0000-0000-000000000401'
+  ) $$,
+  'P0001',
+  'relationship access denied',
+  'unrelated authenticated user cannot read the relationship trust score'
+);
+
 select is(
   (select count(*)::integer from public.ledger_entries),
   0,
@@ -275,6 +318,11 @@ select set_config(
   true
 );
 set local role authenticated;
+
+select ok(
+  public.get_shop_client('00000000-0000-0000-0000-000000000401')->'trust' is not null,
+  'owning shop receives the relationship trust projection through the guarded RPC'
+);
 
 select is(
   (select count(*)::integer from public.client_trust_scores),
